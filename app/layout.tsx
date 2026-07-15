@@ -14,7 +14,12 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="es">
-      <body className="antialiased">{children}</body>
+      {/* suppressHydrationWarning: extensiones del navegador (p. ej. Grammarly)
+          inyectan atributos en <body> antes de que React hidrate, lo que
+          provoca un falso error de hidratación. */}
+      <body className="antialiased" suppressHydrationWarning>
+        {children}
+      </body>
     </html>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import QuantumNebula from "./components/quantum-nebula";
 import HubCarousel from "./components/hub-carousel";
@@ -9,6 +9,7 @@ type Phase = "intro" | "leaving" | "hub";
 
 export default function HomePage() {
   const [phase, setPhase] = useState<Phase>("intro");
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const finishIntro = () =>
     setPhase((p) => (p === "intro" ? "leaving" : p));
@@ -19,6 +20,55 @@ export default function HomePage() {
     if (phase !== "leaving") return;
     const t = setTimeout(() => setPhase("hub"), 900);
     return () => clearTimeout(t);
+  }, [phase]);
+
+  // Robustez móvil: garantiza que la intro avance al hub aunque el navegador
+  // bloquee el autoplay del video, tarde en cargar o falle sin disparar
+  // onEnded/onError (típico en navegadores móviles). Sin esto el usuario
+  // se queda atrapado en el inicio.
+  useEffect(() => {
+    if (phase !== "intro") return;
+    const video = videoRef.current;
+
+    const advance = () => setPhase((p) => (p === "intro" ? "leaving" : p));
+    let fallback: ReturnType<typeof setTimeout>;
+
+    const schedule = (ms: number) => {
+      clearTimeout(fallback);
+      fallback = setTimeout(advance, ms);
+    };
+
+    // Tope de seguridad generoso por si nunca llega a cargar la metadata.
+    schedule(14000);
+
+    if (video) {
+      // El autoplay móvil exige muted; React no siempre fija la propiedad DOM.
+      video.muted = true;
+      video.defaultMuted = true;
+
+      // Cuando se conoce la duración real, ajusta el tope a duración + margen.
+      const onMeta = () => {
+        if (video.duration && Number.isFinite(video.duration)) {
+          schedule(video.duration * 1000 + 2000);
+        }
+      };
+      video.addEventListener("loadedmetadata", onMeta);
+      if (video.readyState >= 1) onMeta();
+
+      // Intenta reproducir explícitamente; si el navegador rechaza el
+      // autoplay, no atrapamos al usuario y avanzamos pronto.
+      const playPromise = video.play?.();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch(() => schedule(2500));
+      }
+
+      return () => {
+        video.removeEventListener("loadedmetadata", onMeta);
+        clearTimeout(fallback);
+      };
+    }
+
+    return () => clearTimeout(fallback);
   }, [phase]);
 
   const inHub = phase === "hub";
@@ -53,13 +103,16 @@ export default function HomePage() {
           {/* Video de Atlas sosteniendo el mundo, integrado a la nebulosa */}
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <video
+              ref={videoRef}
               src="/atlas-hero.mp4"
+              poster="/atlas-poster.jpg"
               autoPlay
               muted
               playsInline
+              preload="auto"
               onEnded={finishIntro}
               onError={finishIntro}
-              className="atlas-video h-[82vh] max-w-[92vw] object-contain mix-blend-screen"
+              className="atlas-video h-full w-full object-cover mix-blend-screen sm:h-[82vh] sm:w-auto sm:max-w-[92vw] sm:object-contain"
             />
           </div>
         </div>

@@ -22,6 +22,7 @@ type Tool = {
   tagline: string;
   description: string;
   accent: string;
+  image?: string;
 };
 
 const TOOLS: Tool[] = [
@@ -30,6 +31,7 @@ const TOOLS: Tool[] = [
     tagline: "Horas y horarios",
     description: "Gestión de horas y horarios para nómina.",
     accent: "from-cyan-100 via-sky-50 to-transparent",
+    image: "/kairos.jpg",
   },
   {
     name: "Pronos",
@@ -37,28 +39,54 @@ const TOOLS: Tool[] = [
     description:
       "Presupuestos y proyecciones de costos y gastos para el área.",
     accent: "from-indigo-100 via-blue-50 to-transparent",
+    image: "/pronos.jpg",
   },
 ];
 
 function ToolCard({ tool }: { tool: Tool }) {
   return (
-    <div className="group relative flex h-[380px] w-full flex-col justify-between overflow-hidden rounded-xl border border-black/10 bg-white p-6 shadow-sm transition-all duration-300 hover:border-sky-400/60 hover:shadow-md">
-      <div
-        className={`pointer-events-none absolute inset-0 bg-gradient-to-br ${tool.accent}`}
-      />
-      <div className="relative flex items-center gap-3">
-        <Image
-          src="/atlas-logo.png"
-          alt="Atlas"
-          width={36}
-          height={36}
-          className="h-9 w-9 object-contain"
-        />
-        <span className="text-xs uppercase tracking-[0.25em] text-neutral-400">
-          Atlas · Talento Humano
-        </span>
-      </div>
-      <div className="relative">
+    <div className="group relative flex h-[380px] w-full flex-col justify-between overflow-hidden rounded-xl border border-black/10 bg-white shadow-sm transition-all duration-300 hover:border-sky-400/60 hover:shadow-md">
+      {tool.image ? (
+        <div className="relative h-40 w-full overflow-hidden">
+          <Image
+            src={tool.image}
+            alt={tool.name}
+            fill
+            sizes="300px"
+            className="object-cover transition-transform duration-500 group-hover:scale-105"
+          />
+          <div className="absolute inset-0 bg-gradient-to-t from-white via-white/20 to-transparent" />
+          <div className="absolute left-4 top-4 flex items-center gap-2 rounded-full bg-black/45 px-3 py-1 backdrop-blur-sm">
+            <Image
+              src="/atlas-logo.png"
+              alt="Atlas"
+              width={20}
+              height={20}
+              className="h-5 w-5 object-contain"
+            />
+            <span className="text-[10px] uppercase tracking-[0.2em] text-white/90">
+              Atlas · Talento Humano
+            </span>
+          </div>
+        </div>
+      ) : (
+        <div className="relative flex items-center gap-3 px-6 pt-6">
+          <div
+            className={`pointer-events-none absolute inset-0 bg-gradient-to-br ${tool.accent}`}
+          />
+          <Image
+            src="/atlas-logo.png"
+            alt="Atlas"
+            width={36}
+            height={36}
+            className="relative h-9 w-9 object-contain"
+          />
+          <span className="relative text-xs uppercase tracking-[0.25em] text-neutral-400">
+            Atlas · Talento Humano
+          </span>
+        </div>
+      )}
+      <div className="relative px-6 pb-6">
         <h3 className="text-4xl font-bold tracking-tight text-neutral-900">
           {tool.name}
         </h3>

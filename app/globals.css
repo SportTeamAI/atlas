@@ -8,17 +8,35 @@ body {
 
 /* ——— Intro: video integrado con la nebulosa ——— */
 .atlas-video {
+  /* Móvil (object-cover a pantalla completa): máscara amplia que funde los
+     bordes con la nebulosa sin recortar la figura central. */
   -webkit-mask-image: radial-gradient(
-    ellipse 70% 70% at center,
-    black 55%,
-    transparent 78%
+    ellipse 78% 88% at center,
+    black 60%,
+    transparent 100%
   );
   mask-image: radial-gradient(
-    ellipse 70% 70% at center,
-    black 55%,
-    transparent 78%
+    ellipse 78% 88% at center,
+    black 60%,
+    transparent 100%
   );
   animation: atlas-video-in 2.4s ease-out both;
+}
+
+/* Escritorio: la máscara ajustada al video en object-contain. */
+@media (min-width: 640px) {
+  .atlas-video {
+    -webkit-mask-image: radial-gradient(
+      ellipse 70% 70% at center,
+      black 55%,
+      transparent 78%
+    );
+    mask-image: radial-gradient(
+      ellipse 70% 70% at center,
+      black 55%,
+      transparent 78%
+    );
+  }
 }
 
 @keyframes atlas-video-in {

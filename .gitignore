@@ -28,3 +28,8 @@ next-env.d.ts
 # Firebase
 .firebase/
 firebase-debug.log
+
+# Logs del servidor de desarrollo
+dev.out.log
+dev.err.log
+dev.log
