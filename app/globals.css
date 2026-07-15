@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+html,
+body {
+  height: 100%;
+  background: #000000;
+}
+
+/* ——— Intro: video integrado con la nebulosa ——— */
+.atlas-video {
+  -webkit-mask-image: radial-gradient(
+    ellipse 70% 70% at center,
+    black 55%,
+    transparent 78%
+  );
+  mask-image: radial-gradient(
+    ellipse 70% 70% at center,
+    black 55%,
+    transparent 78%
+  );
+  animation: atlas-video-in 2.4s ease-out both;
+}
+
+@keyframes atlas-video-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ——— Intro: logo de Atlas animado ——— */
+.atlas-logo {
+  filter: drop-shadow(0 0 18px rgba(124, 195, 255, 0.45));
+  animation:
+    atlas-logo-in 1.6s cubic-bezier(0.22, 1, 0.36, 1) both,
+    atlas-logo-float 7s ease-in-out 1.6s infinite;
+}
+
+@keyframes atlas-logo-in {
+  from {
+    opacity: 0;
+    transform: translateY(-18px) scale(0.88);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes atlas-logo-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+/* ——— Hub: entrada suave ——— */
+.hub-in {
+  animation: hub-in 1.1s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes hub-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .atlas-video,
+  .atlas-logo,
+  .hub-in {
+    animation: none;
+  }
+}
