@@ -2,7 +2,7 @@
 
 Plataforma de gestión de herramientas de uso interno de **Talento Humano**.
 
-**En vivo:** https://atlas-vs.web.app
+- **En vivo:** https://atlas-vs.web.app
 
 ## Descripción
 
