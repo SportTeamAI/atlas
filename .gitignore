@@ -33,3 +33,18 @@ firebase-debug.log
 dev.out.log
 dev.err.log
 dev.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Datos locales del backend
+tools/kairos/apps/backend/data/
