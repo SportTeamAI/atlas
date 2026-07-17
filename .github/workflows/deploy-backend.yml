@@ -40,31 +40,16 @@ jobs:
           chmod 600 ~/.ssh/key
           ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Sincronizar código
+      - name: Sincronizar código y reiniciar
         run: |
+          # El VPS tiene PYTHONPATH=/opt/atlas/backend, código en backend/jornada/
           rsync -az --delete \
             --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
             -e "ssh -i ~/.ssh/key" \
             tools/kairos/apps/backend/src/jornada/ \
             root@${{ secrets.VPS_HOST }}:/opt/atlas/backend/jornada/
 
-          rsync -az -e "ssh -i ~/.ssh/key" \
-            tools/kairos/apps/backend/pyproject.toml \
-            root@${{ secrets.VPS_HOST }}:/opt/atlas/backend/
-
-      - name: Instalar deps y reiniciar
-        run: |
           ssh -i ~/.ssh/key root@${{ secrets.VPS_HOST }} '
-            set -e
-            cd /opt/atlas/backend
-
-            # Instalar en el venv si existe, sino en el sistema
-            if [ -f /opt/atlas/venv/bin/pip ]; then
-              /opt/atlas/venv/bin/pip install -q .
-            else
-              pip install -q --break-system-packages .
-            fi
-
             find /opt/atlas/backend -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
             systemctl restart atlas-kairos
             sleep 3
