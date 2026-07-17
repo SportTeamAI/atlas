@@ -1,0 +1,83 @@
+name: deploy-backend
+
+# Despliegue continuo del backend de Atlas (FastAPI + Postgres) al VPS.
+# El front (NOSTRA/atlas) lo despliega el repo Hub-Deportivas; este workflow
+# solo toca el backend.
+#
+# Requisitos (GitHub repo atlas → Settings → Secrets / Variables):
+#   Secrets : VPS_HOST     → IP o hostname del VPS (el mismo que Nemesis)
+#             VPS_SSH_KEY  → clave privada SSH (la misma que Nemesis)
+#   Variables: DEPLOY_ENABLED = 'true'   (ponerlo en false para pausar deploys)
+#
+# Ruta en VPS:
+#   Código  → /opt/atlas/backend/jornada/   (PYTHONPATH=/opt/atlas/backend)
+#   venv    → /opt/atlas/venv/
+#   Servicio→ atlas-kairos  (systemd)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/kairos/apps/backend/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-atlas-backend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/key
+          chmod 600 ~/.ssh/key
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sincronizar código
+        run: |
+          rsync -az --delete \
+            --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
+            -e "ssh -i ~/.ssh/key" \
+            tools/kairos/apps/backend/src/jornada/ \
+            root@${{ secrets.VPS_HOST }}:/opt/atlas/backend/jornada/
+
+          rsync -az -e "ssh -i ~/.ssh/key" \
+            tools/kairos/apps/backend/pyproject.toml \
+            root@${{ secrets.VPS_HOST }}:/opt/atlas/backend/
+
+      - name: Instalar deps y reiniciar
+        run: |
+          ssh -i ~/.ssh/key root@${{ secrets.VPS_HOST }} '
+            set -e
+            cd /opt/atlas/backend
+
+            # Instalar en el venv si existe, sino en el sistema
+            if [ -f /opt/atlas/venv/bin/pip ]; then
+              /opt/atlas/venv/bin/pip install -q .
+            else
+              pip install -q --break-system-packages .
+            fi
+
+            find /opt/atlas/backend -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+            systemctl restart atlas-kairos
+            sleep 3
+            systemctl is-active atlas-kairos
+          '
+
+      - name: Health check
+        run: |
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" \
+              "https://api.productodeportivas.com/atlas-api/health")
+            echo "intento $i → HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 5
+          done
+          echo "::warning::health check no respondió 200 tras el deploy."
