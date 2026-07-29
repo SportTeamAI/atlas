@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MARCA — Paleta teal de WC System (la misma del hub Nostra).
+   Anclaje: blue-600 == #16697A. Remapeamos la rampa blue-* a teal para que
+   botones, badges y acentos sean teal sin tocar cada componente.
+   ════════════════════════════════════════════════════════════════════════════ */
+@theme {
+  --color-blue-50:  #eef7f9;
+  --color-blue-100: #d5eaef;
+  --color-blue-200: #afd6df;
+  --color-blue-300: #82c0cc;
+  --color-blue-400: #489fb5;
+  --color-blue-500: #2a8aa1;
+  --color-blue-600: #16697a; /* primary WC */
+  --color-blue-700: #115463;
+  --color-blue-800: #0f4450;
+  --color-blue-900: #0d3943;
+  --color-blue-950: #07232a;
+
+  /* Semánticos muteados (verde positivo, ámbar alerta, rojo negativo) */
+  --color-emerald-500: #2f9c7e; --color-emerald-600: #2a8770;
+  --color-green-500: #2f9c7e;   --color-green-600: #2a8770;
+  --color-amber-500: #cf9a35;   --color-amber-600: #b9831f;
+  --color-rose-500: #d65068;    --color-rose-600: #c23a53;
+  --color-red-500: #d65151;     --color-red-600: #c23a3a;
+  --color-violet-500: #7e73b3;  --color-violet-600: #6f6aa6;
+
+  --font-display: "Inter", sans-serif;
+  --font-impact: "Bebas Neue", cursive;
+  --font-mono: "Roboto Mono", monospace;
+}
+
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font-family: var(--font-display);
+  background: #f4f6f8;
+  color: #0f172a;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Forzamos tema claro: evita que los desplegables/date pickers nativos salgan
+   en negro cuando el SO está en modo oscuro (#5). */
+:root { color-scheme: light; }
+
+/* Fallback para cualquier <select> nativo que aún no use el componente Select:
+   flecha propia teal, fondo blanco, borde de marca. */
+select:not([data-native]) {
+  -webkit-appearance: none; -moz-appearance: none; appearance: none;
+  background-color: #fff;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  padding-right: 28px;
+}
+select:not([data-native]) option { background: #fff; color: #0f172a; }
+
+.font-impact { font-family: var(--font-impact); letter-spacing: 0.02em; }
+.font-mono { font-family: var(--font-mono); }
+.tabular { font-variant-numeric: tabular-nums; }
+
+/* Scrollbar sobrio */
+.scroll-thin { scrollbar-width: thin; scrollbar-color: #cbd5e1 transparent; }
+.scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scroll-thin::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 99px; }
+.scroll-thin::-webkit-scrollbar-thumb:hover { background: #cbd5e1; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.animate-spin { animation: spin 0.8s linear infinite; }

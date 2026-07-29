@@ -351,6 +351,9 @@ class PeriodoIn(BaseModel):
     fecha_pago: date | None = None
     fecha_reporte_financiera: date | None = None
     frecuencia: str = "quincenal"
+    # Período ESPECIAL de un área (None = global, aplica a todas). Deja crear la quincena
+    # propia de un área cuando sus fechas difieren del calendario general.
+    equipo_id: str | None = None
 
 
 class TiempoAlmuerzoOut(_ORM):
@@ -450,21 +453,6 @@ class NotificacionOut(_ORM):
 class FestivoOut(_ORM):
     nombre: str
     fecha_descanso: date
-
-
-class FestivoExcepcionIn(BaseModel):
-    fecha: date
-    tipo: str          # 'agregar' | 'quitar'
-    motivo: str | None = None
-
-
-class FestivoExcepcionOut(_ORM):
-    id: str
-    fecha: date
-    tipo: str
-    motivo: str | None
-    creado_por: str | None
-    creado_en: datetime
 
 
 class EventoEspecialOut(_ORM):

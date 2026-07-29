@@ -125,16 +125,24 @@ def asignar_permiso(
     h = db.scalar(select(m.Herramienta).where(m.Herramienta.slug == payload.herramienta))
     if not h:
         raise HTTPException(404, "Herramienta no encontrada.")
-    if payload.rol not in (h.roles or []):
-        raise HTTPException(400, f"Rol inválido para {h.nombre}. Válidos: {', '.join(h.roles or [])}.")
+    # El panel del hub manda un rol genérico ("miembro") que no es de la herramienta. El
+    # toggle solo concede ACCESO: si el rol no es válido se usa el rol BASE (el último, el de
+    # menor privilegio) y NO se le baja el rol a quien ya lo tenía. El rol fino se ajusta
+    # dentro de la herramienta. #hub-toggle
+    rol_valido = payload.rol if payload.rol in (h.roles or []) else (u.rol if u.rol in (h.roles or []) else None)
+    rol_base = (h.roles or [None])[-1]
 
     p = db.scalar(select(m.Permiso).where(
         m.Permiso.usuario_id == u.id, m.Permiso.herramienta_id == h.id))
     if p:
-        p.rol = payload.rol
+        if rol_valido:
+            p.rol = rol_valido
         p.otorgado_por = admin.id
     else:
-        p = m.Permiso(usuario_id=u.id, herramienta_id=h.id, rol=payload.rol, otorgado_por=admin.id)
+        rol_nuevo = rol_valido or rol_base
+        if not rol_nuevo:
+            raise HTTPException(400, f"{h.nombre} no tiene roles definidos.")
+        p = m.Permiso(usuario_id=u.id, herramienta_id=h.id, rol=rol_nuevo, otorgado_por=admin.id)
         db.add(p)
     db.commit()
     db.refresh(p)

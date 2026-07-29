@@ -1,0 +1,27 @@
+# Entornos y dependencias
+.venv/
+venv/
+node_modules/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Secretos y entorno (nunca al repo)
+.env
+.env.*
+!.env.example
+*.p8
+*.pem
+secrets/
+
+# Logs y datos
+*.log
+# Solo la BD/datos del backend (no el código fuente del frontend en src/data)
+apps/backend/data/
+coverage.xml
+.coverage

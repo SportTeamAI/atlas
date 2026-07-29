@@ -82,16 +82,13 @@ def _extra_hours(
     if es_extra_marcado and jornada == JornadaType.ESTANDAR:
         return net
     if jornada == JornadaType.ESTANDAR:
-        if daily_accumulated_before > 1e-9:
-            # Bloque AGREGADO (hora extra / conexión aparte sobre el horario base): es
-            # TODO extra. La categoría (diurna/nocturna, festivo/dominical) la pone el
-            # propio tramo: p. ej. un agregado 18-20 = 1 h extra diurna (18-19) + 1 h
-            # extra nocturna (19-20).
-            return net
-        # Bloque BASE (el turno establecido del día): extra = el TRABAJO (neto, ya sin
-        # almuerzo) que pase de la jornada diaria (8 h de TRABAJO). Un 8-16 (7 h de
-        # trabajo) = 0 extra; 8-17 (8 h) = 0 extra; 8-18 (9 h) = 1 h extra.
-        return max(0.0, net - daily_limit)
+        # Solo lo cargado desde EXTRAS/NOVEDADES (con motivo) es extra sí o sí (arriba).
+        # Un bloque de HORARIO normal (sin motivo), aunque sea el 2º bloque del día, es
+        # jornada NORMAL: la extra es lo que el ACUMULADO del día (base + este bloque)
+        # pase de la jornada diaria (8 h de TRABAJO). Así 15-23 + 23-00 (8 h netas, sin
+        # motivo) = 0 extra; un 8-16 (7 h) = 0; 8-17 (8 h) = 0; 8-18 (9 h) = 1; y base
+        # 8 h + 2 h sin motivo = 2 extra. Un agregado con motivo sí es todo extra (arriba).
+        return max(0.0, (daily_accumulated_before + net) - daily_limit)
     if jornada == JornadaType.FLEXIBLE:
         # Extra solo si el acumulado semanal supera el máximo legal/pactado.
         exceso = (weekly_accumulated_before + net) - weekly_limit

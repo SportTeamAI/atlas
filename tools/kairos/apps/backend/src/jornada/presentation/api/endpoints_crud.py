@@ -32,9 +32,13 @@ from jornada.presentation.api.deps import current_user, dominio_permitido, equip
 router = APIRouter(tags=["crud"])
 log = structlog.get_logger()
 
-# Fecha "hoy" del ambiente de prueba. El demo está construido alrededor del
-# 1 jul 2026 (período en curso NM1QJulio26). En producción se usará date.today().
-HOY_DEMO = date(2026, 7, 6)   # corte de la 1.ª quincena de julio: NM1QJulio26 queda ABIERTA para pruebas
+# El VPS corre en UTC; Colombia es UTC-5. Sin esto, entre las 19:00 y medianoche
+# hora Colombia el servidor ya cree que es el día siguiente y ADELANTA los períodos
+# (activa la quincena que aún no empieza). Reusa el reloj de Bogotá del modelo (offset
+# fijo, sin depender de la base tz de zoneinfo que Windows no trae).
+def _hoy() -> date:
+    """Fecha de HOY en Colombia (no la del servidor, que va en UTC)."""
+    return m.ahora_bogota().date()
 
 _DIAS = {
     "lunes": 0, "martes": 1, "miercoles": 2, "miércoles": 2, "jueves": 3,
@@ -42,16 +46,17 @@ _DIAS = {
 }
 
 
-def _estado_periodo(p: m.Periodo, hoy: date = HOY_DEMO) -> str:
-    """Estado REAL del período según el calendario (no depende del valor guardado, que
-    puede estar viejo). El cierre manual de TH manda."""
+def _estado_periodo(p: m.Periodo, hoy: date = None) -> str:
+    """Estado del período. Regla (según operación): el período NO cambia solo porque pase
+    la fecha; sigue EN CURSO hasta que TH lo cierre (envío a financiera). Así el sistema no
+    salta a la quincena nueva mientras la anterior siga abierta, y TH controla el avance."""
+    if hoy is None:
+        hoy = _hoy()
     if p.cerrado_en:
-        return "cerrado"
+        return "cerrado"             # TH lo cerró → pasa al histórico
     if hoy < p.fecha_inicio:
         return "programado"          # aún no empieza
-    if p.fecha_inicio <= hoy <= p.fecha_fin:
-        return "abierto"             # EN CURSO (el único ajustable)
-    return "en_revision"             # ya terminó: espera validación/cierre de TH
+    return "abierto"                 # EN CURSO hasta que TH lo cierre (aunque ya pasó la fecha)
 
 # Equipos de turnos fijos cuyas horas extra se reportan DÍA A DÍA (no por acumulado
 # semanal). Fuente única en schemas_crud (la comparte el motor y la UI vía EquipoOut).
@@ -129,6 +134,20 @@ def _partir_medianoche(fecha: date, ini: time, fin: time) -> list[tuple[date, ti
     if fin <= ini and fin != time(0, 0):
         return [(fecha, ini, time(0, 0)), (fecha + timedelta(days=1), time(0, 0), fin)]
     return [(fecha, ini, fin)]
+
+
+def _periodo_de_fecha(db: Session, fecha: date, equipo_id: str | None):
+    """El período que cubre `fecha` para el ÁREA del empleado: su período propio si existe,
+    o el global. Sin esto, la cola de un turno que cruza medianoche (00:00–02:00 del día
+    siguiente) caía en el período de OTRA área que solo comparte la fecha, y no se veía en
+    la grilla del área (el total sí sumaba, pero el usuario creía que se perdía)."""
+    if equipo_id:
+        p = db.scalar(select(m.Periodo).where(
+            m.Periodo.fecha_inicio <= fecha, m.Periodo.fecha_fin >= fecha, m.Periodo.equipo_id == equipo_id))
+        if p:
+            return p
+    return db.scalar(select(m.Periodo).where(
+        m.Periodo.fecha_inicio <= fecha, m.Periodo.fecha_fin >= fecha, m.Periodo.equipo_id.is_(None)))
 
 
 def _meal_efectivo(meal: float, ini: time, fin: time) -> float:
@@ -211,7 +230,13 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
         # ¿Es la "cola" (00:00-…) de un turno que arrancó el día anterior? Entonces es
         # la CONTINUACIÓN del turno base, no un bloque agregado: no toma el almuerzo del
         # día (lo toma el turno propio) ni marca el turno propio como "agregado" (extra).
-        es_cola = reg.hora_inicio == _MID and (reg.fecha - timedelta(days=1)) in dias_fin_mid
+        # Un bloque que ARRANCA a medianoche es SIEMPRE cola: ningún turno del catálogo
+        # arranca a las 00:00, así que un 00:00-… solo puede ser la madrugada de un turno
+        # nocturno partido. Aunque su turno base del día anterior ya no exista (quedó
+        # HUÉRFANA porque se borró el turno de la tarde y sobró la madrugada), sigue
+        # siendo cola: si no, se contaría como el 1er bloque del día y volvería EXTRA el
+        # turno de la tarde de ESE día (extra nocturna fantasma). #cola-huerfana
+        es_cola = reg.hora_inicio == _MID
         # Día a día para todos, SALVO Deportivas/Operaciones en semanas con festivo, que
         # van por acumulado SEMANAL (sumatorio). SAC/Riesgos/Incidentes: siempre diario.
         semana_diaria = equipo_siempre_diario or (wk not in semanas_festivo)
@@ -338,6 +363,10 @@ def _crear_o_activar_usuario(
 
     El usuario queda RELACIONADO con su empleado (`empleado_id`): el nombre, el área y la
     cédula salen siempre de ahí (dato real de Buk), nunca de texto suelto."""
+    # Solo roles que la app entiende: un rol ajeno (p. ej. "miembro" de otro módulo) dejaría
+    # a la persona sin menú y con la pantalla en blanco al entrar.
+    if rol not in ("super_admin", "registrador", "lider"):
+        raise HTTPException(400, f"Rol no válido para Jornada Laboral: '{rol}'. Usa Administrador, Líder o Registrador.")
     correo = email.strip().lower()
     if not empleado_id:   # acceso creado a mano: amarrarlo al empleado que tenga ese correo
         emp = db.scalar(select(m.Empleado).where(func.lower(m.Empleado.email) == correo))
@@ -395,8 +424,7 @@ def _acceso_out(db: Session, u: m.Usuario, *, incluir_url: bool = True) -> s.Acc
     pendiente = bool(u.onboarding_token) and not u.password_hash
     # El enlace de onboarding SIRVE PARA PONER LA CONTRASEÑA: quien lo tenga entra como esa
     # persona. Solo se le entrega a Talento Humano, que es quien lo comparte.
-    # Hash (#token) en vez de query param: el fragmento no llega al servidor → no queda en logs de nginx.
-    url = f"{get_settings().frontend_base_url}/onboarding#{u.onboarding_token}" if (pendiente and incluir_url) else None
+    url = f"{get_settings().frontend_base_url}/?onboarding={u.onboarding_token}" if (pendiente and incluir_url) else None
     return s.AccesoOut(
         id=u.id, nombre=(emp.nombre if emp else u.nombre), email=u.email, rol=u.rol,
         equipo_id=(eq.id if eq else None),
@@ -1007,6 +1035,16 @@ def _guardar_cambio(db: Session, periodo_id: str, user: m.Usuario) -> None:
                               descripcion=f"{user.nombre} modificó horarios; espera el reenvío para validar."))
 
 
+def _traza_edicion_th(db: Session, periodo_id: str, user: m.Usuario, emp: m.Empleado | None, per: m.Periodo | None, accion: str) -> None:
+    """Deja constancia en el chat del ÁREA cuando TH corrige la grilla de un período YA
+    CERRADO (trazabilidad de la corrección; TH no tiene equipo propio, así que _guardar_cambio
+    no la registra). Solo en cerrados: en abiertos saturaría el chat."""
+    if user.rol == "super_admin" and emp and per and _estado_periodo(per) == "cerrado":
+        _evento(db, periodo_id, user,
+                f"{user.nombre} (Talento Humano) {accion} de {emp.nombre} en un período ya cerrado.",
+                equipo_id=emp.equipo_id)
+
+
 def _reevaluar_flujo_area(db: Session, per: m.Periodo, equipo_id: str | None, user: m.Usuario) -> None:
     """#3 Si tras borrar horarios el área se queda SIN datos (ningún horario ni
     novedad del período), el flujo vuelve a 'registro': hay que registrar, validar,
@@ -1051,21 +1089,20 @@ def listar_periodos(user: m.Usuario = Depends(current_user), db: Session = Depen
 
     Regla (#12.1): a lo sumo UN período abierto por área — el que corre hoy.
     """
-    hoy = HOY_DEMO
+    hoy = _hoy()
     periodos = list(db.scalars(select(m.Periodo).order_by(m.Periodo.fecha_inicio.desc())))
     area_nombres = {e.id: e.nombre for e in db.scalars(select(m.Equipo))}
     for p in periodos:
         p.area_nombre = area_nombres.get(p.equipo_id) if p.equipo_id else None
-    cambio = False
+    # El estado se calcula en tiempo real desde las fechas; no se persiste aquí.
+    # expunge_all() desvincula todos los objetos de la sesión ANTES de modificarlos,
+    # garantizando que ningún autoflush ni commit accidental los escriba en DB.
+    db.expunge_all()
     for p in periodos:
-        nuevo = _estado_periodo(p, hoy)
-        if p.estado != nuevo:
-            p.estado = nuevo; cambio = True
-    if cambio:
-        db.commit()
+        p.estado = _estado_periodo(p, hoy)
     # Filtrado por ÁREA: un usuario de un área ve sus períodos propios + los globales que
     # NO estén tapados por uno propio (que cruce sus fechas). TH (sin área) ve todos.
-    if user.equipo_id:
+    if user.equipo_id and user.rol != "super_admin":
         propios = [p for p in periodos if p.equipo_id == user.equipo_id]
         def _tapado(g):
             return any(a.fecha_inicio <= g.fecha_fin and g.fecha_inicio <= a.fecha_fin for a in propios)
@@ -1076,9 +1113,9 @@ def listar_periodos(user: m.Usuario = Depends(current_user), db: Session = Depen
     orden = {"abierto": 0, "programado": 1, "en_revision": 2, "cerrado": 3}
     def _key(p):
         g = orden.get(p.estado, 9)
-        # programado ascendente; el resto descendente
+        # abierto y programado: ascendente (el más antiguo/próximo primero); en_revision y cerrado: descendente
         f = p.fecha_inicio.toordinal()
-        return (g, f if p.estado == "programado" else -f)
+        return (g, f if p.estado in ("abierto", "programado") else -f)
     periodos.sort(key=_key)
     return periodos
 
@@ -1171,13 +1208,30 @@ def exportar_recargos(
         raise HTTPException(404, "Período no encontrado.")
     # #4: la carpeta lleva el número de quincena del año como prefijo.
     carpeta = f"{per.secuencia}. {per.nombre or per.id[:6]}"
-    registros = list(db.scalars(select(m.RegistroHorario).where(m.RegistroHorario.periodo_id == per.id)))
+    # Mismas horas que el reporte a Financiera: TODOS los períodos de la quincena (por nombre),
+    # cada empleado con el período de SU área; más los ajustes de TH. Sin esto, el Excel del
+    # área salía VACÍO (las horas estaban en el período del área, no en el seleccionado).
+    periodos_q = list(db.scalars(select(m.Periodo).where(m.Periodo.nombre == per.nombre)))
+    global_pid = next((p.id for p in periodos_q if p.equipo_id is None), None)
+    area_pid = {p.equipo_id: p.id for p in periodos_q if p.equipo_id}
+    ids_quincena = [p.id for p in periodos_q]
+    _eq_de = {e.id: e.equipo_id for e in db.scalars(select(m.Empleado))}
+    registros = [r for r in db.scalars(select(m.RegistroHorario).where(m.RegistroHorario.periodo_id.in_(ids_quincena)))
+                 if r.periodo_id == area_pid.get(_eq_de.get(r.empleado_id), global_pid)]
     agg = _agrega_horas_por_categoria(registros)
+    for a in db.scalars(select(m.AjusteReporte).where(m.AjusteReporte.periodo_id.in_(ids_quincena))):
+        d = agg.setdefault(a.empleado_id, {})
+        d[a.categoria] = round(d.get(a.categoria, 0.0) + a.horas, 2)
     areas = list(db.scalars(select(m.Equipo).where(m.Equipo.activo).order_by(m.Equipo.nombre)))
 
     archivos: list[tuple[str, bytes]] = []
     for area in areas:
-        emps = list(db.scalars(select(m.Empleado).where(m.Empleado.equipo_id == area.id, m.Empleado.activo).order_by(m.Empleado.nombre)))
+        # Solo empleados que LLEVAN horario. Un área sin ninguno (p. ej. Talento Humano,
+        # que usa la herramienta pero no marca turnos) NO va al ZIP ni a Financiera (#5).
+        emps = list(db.scalars(select(m.Empleado).where(
+            m.Empleado.equipo_id == area.id, m.Empleado.activo, m.Empleado.lleva_horario).order_by(m.Empleado.nombre)))
+        if not emps:
+            continue
         filas = [{"cedula": e.cedula, "nombre": e.nombre, "cargo": e.cargo,
                   "cats": agg.get(e.id, {}), "observaciones": ""} for e in emps]
         contenido = reporte_excel.construir_excel_area(
@@ -1216,11 +1270,18 @@ def generar_carpeta_nomina(
 def crear_periodo(payload: s.PeriodoIn, _: m.Usuario = Depends(require_rol("super_admin")), db: Session = Depends(get_session)):
     if payload.fecha_corte < payload.fecha_inicio or payload.fecha_corte > payload.fecha_fin + timedelta(days=30):
         raise HTTPException(400, "La fecha de corte debe estar dentro o cerca del rango del período.")
-    if payload.nombre and db.scalar(select(m.Periodo).where(func.lower(m.Periodo.nombre) == payload.nombre.strip().lower())):
-        raise HTTPException(409, "Ya existe un período con ese nombre.")
-    # No permitir solape de rangos con otro período (evita quincenas duplicadas). #6
+    # Alcance: global (equipo_id None) o el especial de un área. El nombre único y el solape
+    # se validan SOLO dentro del mismo alcance — el especial de un área comparte nombre y
+    # se solapa con el global de esa quincena a propósito (son la misma quincena, otra área).
+    eq = payload.equipo_id or None
+    ambito = m.Periodo.equipo_id.is_(None) if eq is None else (m.Periodo.equipo_id == eq)
+    if eq and not db.get(m.Equipo, eq):
+        raise HTTPException(404, "El área indicada no existe.")
+    if payload.nombre and db.scalar(select(m.Periodo).where(
+            ambito, func.lower(m.Periodo.nombre) == payload.nombre.strip().lower())):
+        raise HTTPException(409, "Ya existe un período con ese nombre para ese alcance.")
     solape = db.scalar(select(m.Periodo).where(
-        m.Periodo.fecha_inicio <= payload.fecha_fin, m.Periodo.fecha_fin >= payload.fecha_inicio))
+        ambito, m.Periodo.fecha_inicio <= payload.fecha_fin, m.Periodo.fecha_fin >= payload.fecha_inicio))
     if solape:
         raise HTTPException(409, f"El rango se solapa con el período '{solape.nombre or solape.id[:6]}'.")
     per = m.Periodo(**payload.model_dump())
@@ -1282,8 +1343,7 @@ def reabrir_periodo(
     if not per:
         raise HTTPException(404, "Período no encontrado.")
     per.cerrado_en = None
-    if per.estado == "cerrado":
-        per.estado = "en_revision"
+    per.estado = "abierto"   # reabierto = vuelve a estar EN CURSO (el estado real se calcula por fechas)
     eq_filtro = payload.equipo_id if payload else None
     q = select(m.PeriodoEquipo).where(m.PeriodoEquipo.periodo_id == per.id)
     if eq_filtro:
@@ -1409,8 +1469,9 @@ def enviar_periodo(
     db.add(m.Notificacion(rol_destino="super_admin", equipo_id=user.equipo_id, tipo="PERIODO_LISTO",
                           titulo=f"{area}: listo para revisión de TH",
                           descripcion=f"{user.nombre} envió a Talento Humano los horarios de {area} ({per.nombre})."))
-    if per.estado == "abierto":
-        per.estado = "en_revision"
+    # El período GLOBAL sigue EN CURSO aunque un área envíe a TH: el avance de cada área se
+    # rastrea con estado_flujo (en_th), no cambiando el estado del período (eso bloqueaba a
+    # las demás áreas y a TH al querer seguir cargando). Solo el cierre de TH lo saca de curso.
     db.commit()
     db.refresh(per)
     return per
@@ -1425,7 +1486,7 @@ def cerrar_periodo(periodo_id: str, _: m.Usuario = Depends(require_rol("super_ad
     #  (a) que el período ya haya llegado a su fecha de corte (reporte a TH), y
     #  (b) que existan horas registradas.
     faltantes = []
-    if HOY_DEMO < per.fecha_corte:
+    if _hoy() < per.fecha_corte:
         faltantes.append(f"aún no llega la fecha de corte ({per.fecha_corte.isoformat()})")
     n_reg = db.scalar(select(func.count()).select_from(m.RegistroHorario).where(m.RegistroHorario.periodo_id == per.id)) or 0
     if n_reg == 0:
@@ -1530,13 +1591,19 @@ def aprobar_periodo(
     if not per:
         raise HTTPException(404, "Período no encontrado.")
     eq_filtro = payload.equipo_id if payload else None
-    q = select(m.PeriodoEquipo).where(
-        m.PeriodoEquipo.periodo_id == per.id, m.PeriodoEquipo.estado_flujo == "en_th")
+    # Cuando TH aprueba un área específica (eq_filtro) puede estar en cualquier
+    # estado de flujo (edita y confirma directo, sin pasar por el líder).
+    # Sin eq_filtro (aprobación masiva) solo se aprueban las que ya están en_th.
     if eq_filtro:
-        q = q.where(m.PeriodoEquipo.equipo_id == eq_filtro)
-    pes = list(db.scalars(q))
-    if not pes:
-        raise HTTPException(409, "No hay áreas pendientes de aprobar (deben estar enviadas a Talento Humano).")
+        # TH confirma un área específica: si aún no tiene registro de flujo (porque TH cargó
+        # las horas directo, sin pasar por el líder), se CREA aquí para poder confirmarla.
+        pes = [_ensure_pe(db, per.id, eq_filtro)]
+    else:
+        pes = list(db.scalars(select(m.PeriodoEquipo).where(
+            m.PeriodoEquipo.periodo_id == per.id,
+            m.PeriodoEquipo.estado_flujo == "en_th")))
+        if not pes:
+            raise HTTPException(409, "No hay áreas para aprobar en este período.")
     for pe in pes:
         pe.estado_flujo = "aprobado"
         pe.aprobado_rh = True
@@ -1603,10 +1670,10 @@ def crear_comentario(
             db.add(m.Notificacion(rol_destino=destino, equipo_id=eq, tipo="PERIODO_LISTO",
                                   titulo="Nuevo mensaje en el chat del período",
                                   descripcion=f"{user.nombre}: {payload.texto[:120]}"))
-    # #2 Un comentario/observación de TH DEVUELVE el área al equipo (si estaba en TH):
-    # deja de estar en revisión y vuelve a 'registro' para que corrijan. Si TH está
-    # conforme, aprueba (esa es la validación); no comenta.
-    if user.rol == "super_admin" and eq and payload.tipo in ("comentario", "observacion"):
+    # #2 Solo una OBSERVACIÓN de TH DEVUELVE el área al equipo (si estaba en TH): vuelve a
+    # 'registro' para que corrijan. Un COMENTARIO normal NO devuelve el flujo — TH puede
+    # comentar la línea de tiempo sin sacar el área de revisión. Si TH está conforme, aprueba.
+    if user.rol == "super_admin" and eq and payload.tipo == "observacion":
         pe_dev = db.scalar(select(m.PeriodoEquipo).where(
             m.PeriodoEquipo.periodo_id == periodo_id, m.PeriodoEquipo.equipo_id == eq))
         if pe_dev and pe_dev.estado_flujo == "en_th":
@@ -1853,7 +1920,7 @@ def aplicar_habitual(
     per = db.get(m.Periodo, periodo_id)
     if not per:
         raise HTTPException(404, "Período no encontrado.")
-    if per.estado != "abierto":
+    if _estado_periodo(per) != "abierto":
         raise HTTPException(409, "El período no está abierto.")
     _guardar_cambio(db, periodo_id, user)
 
@@ -1964,7 +2031,7 @@ def asignar(
     per = db.get(m.Periodo, periodo_id)
     if not per:
         raise HTTPException(404, "Período no encontrado.")
-    if per.estado != "abierto":
+    if _estado_periodo(per) != "abierto":
         raise HTTPException(409, "El período no está abierto.")
     _guardar_cambio(db, periodo_id, user)
     turno = db.get(m.Turno, payload.turno_id) if payload.turno_id else None
@@ -1996,6 +2063,10 @@ def asignar(
             for dia in dias:
                 for prev in db.scalars(select(m.RegistroHorario).where(
                         m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == dia)):
+                    # La cola HEREDADA del corte anterior (madrugada del 1er día) NUNCA se borra:
+                    # es solo informativa y cuenta para el pago. Ni por "Borrar" en bloque. #cola-heredada
+                    if prev.hora_inicio == time(0, 0) and dia == per.fecha_inicio:
+                        continue
                     db.delete(prev); creados += 1
                 nov = db.scalar(select(m.Novedad).where(
                     m.Novedad.empleado_id == emp.id,
@@ -2015,6 +2086,8 @@ def asignar(
             for dia in dias:
                 for prev in db.scalars(select(m.RegistroHorario).where(
                         m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == dia)):
+                    if prev.hora_inicio == time(0, 0) and dia == per.fecha_inicio:
+                        continue   # la cola heredada del corte anterior se conserva (#cola-heredada)
                     db.delete(prev)
                 nov = db.scalar(select(m.Novedad).where(
                     m.Novedad.empleado_id == emp.id,
@@ -2069,7 +2142,7 @@ def asignar(
             for f, i, ff in _partir_medianoche(dia, ini, fin):
                 pid = per.id
                 if f != dia:
-                    per_f = db.scalar(select(m.Periodo).where(m.Periodo.fecha_inicio <= f, m.Periodo.fecha_fin >= f))
+                    per_f = _periodo_de_fecha(db, f, emp.equipo_id)
                     pid = per_f.id if per_f else per.id
                     for prev in db.scalars(select(m.RegistroHorario).where(
                             m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == f,
@@ -2097,7 +2170,7 @@ def aplicar_turno(
 ) -> dict:
     """Aplica un TURNO (horario fijo) a todo el período (atajo de registro)."""
     per = db.get(m.Periodo, periodo_id)
-    if not per or per.estado != "abierto":
+    if not per or _estado_periodo(per) != "abierto":
         raise HTTPException(409, "El período no está abierto.")
     _guardar_cambio(db, periodo_id, user)
     turno = db.get(m.Turno, payload.turno_id)
@@ -2164,8 +2237,16 @@ def reporte_periodo(periodo_id: str, user: m.Usuario = Depends(current_user), db
         raise HTTPException(404, "Período no encontrado.")
     vis = equipos_visibles(user)
 
+    # Áreas con período PROPIO guardan sus registros con otro periodo_id; todos los de la
+    # quincena comparten el NOMBRE (p. ej. "NM2QJulio26"). Cada empleado se liquida con el
+    # período de SU área (o el global si su área no tiene propio): así un registro mal
+    # archivado en otro período de la misma quincena NO infla sus horas (bug de Laura Molina).
+    periodos_q = list(db.scalars(select(m.Periodo).where(m.Periodo.nombre == per.nombre)))
+    global_pid = next((p.id for p in periodos_q if p.equipo_id is None), None)
+    area_pid = {p.equipo_id: p.id for p in periodos_q if p.equipo_id}
+    ids_quincena = [p.id for p in periodos_q]
     q_emp = select(m.Empleado).where(m.Empleado.activo, m.Empleado.lleva_horario)  # solo quien lleva horario
-    q_reg = select(m.RegistroHorario).where(m.RegistroHorario.periodo_id == per.id) \
+    q_reg = select(m.RegistroHorario).where(m.RegistroHorario.periodo_id.in_(ids_quincena)) \
         .join(m.Empleado, m.Empleado.id == m.RegistroHorario.empleado_id)
     q_nov = select(m.Novedad).join(m.Empleado, m.Empleado.id == m.Novedad.empleado_id)
     if vis is not None:
@@ -2174,7 +2255,9 @@ def reporte_periodo(periodo_id: str, user: m.Usuario = Depends(current_user), db
         q_reg = q_reg.where(m.Empleado.equipo_id.in_(eqs))
         q_nov = q_nov.where(m.Empleado.equipo_id.in_(eqs))
     empleados = list(db.scalars(q_emp))
-    registros = list(db.scalars(q_reg))
+    _eq_de = {e.id: e.equipo_id for e in empleados}
+    registros = [r for r in db.scalars(q_reg)
+                 if r.periodo_id == area_pid.get(_eq_de.get(r.empleado_id), global_pid)]
     novedades = list(db.scalars(q_nov))
 
     sem_map, sem_meta = _semanas_de_periodo(per)  # #3 semanas ISO del período
@@ -2214,7 +2297,10 @@ def reporte_periodo(periodo_id: str, user: m.Usuario = Depends(current_user), db
     # AJUSTES DE TH: se aplican ENCIMA de lo reportado (no tocan la grilla). Suman/restan a
     # su categoría y al total → esto es lo que se envía a Financiera. Se exponen por empleado
     # con su motivo para trazabilidad (la nota también quedó en Consolidado y chat).
-    ajustes = list(db.scalars(select(m.AjusteReporte).where(m.AjusteReporte.periodo_id == per.id)))
+    # Los ajustes se guardan sobre el período del ÁREA del empleado; el reporte puede verse
+    # con el global seleccionado, así que se leen de TODA la quincena (mismo nombre), no solo
+    # del período seleccionado — si no, un ajuste hecho por área no aparecía en el reporte.
+    ajustes = list(db.scalars(select(m.AjusteReporte).where(m.AjusteReporte.periodo_id.in_(ids_quincena))))
     ajustes_emp: dict[str, list] = {}
     for a in ajustes:
         if a.empleado_id not in agg:
@@ -2280,6 +2366,8 @@ def borrar_novedad(novedad_id: str, user: m.Usuario = Depends(require_rol("super
     if nov:
         emp = _exigir_empleado_visible(db, user, nov.empleado_id)
         per = db.get(m.Periodo, nov.periodo_id) if nov.periodo_id else None
+        if per and _estado_periodo(per) == "cerrado" and user.rol != "super_admin":
+            raise HTTPException(409, "El período ya está cerrado; no se puede modificar.")
         if nov.periodo_id:
             _guardar_cambio(db, nov.periodo_id, user)
         db.delete(nov)
@@ -2321,7 +2409,9 @@ def crear_registro(payload: s.RegistroIn, user: m.Usuario = Depends(require_rol(
         per = db.get(m.Periodo, payload.periodo_id)
         if not per:
             raise HTTPException(404, "Período no encontrado.")
-        if per.estado == "cerrado":
+        # Período cerrado: solo TH (super_admin) puede corregir; operativos usan Solicitud de
+        # cambio. Los cambios de TH quedan en la trazabilidad del chat (via _guardar_cambio).
+        if _estado_periodo(per) == "cerrado" and user.rol != "super_admin":
             raise HTTPException(409, "El período ya está cerrado; usa Solicitud de cambio.")
         if not (per.fecha_inicio <= payload.fecha <= per.fecha_fin):
             raise HTTPException(400, "La fecha está fuera del rango del período.")
@@ -2377,8 +2467,9 @@ def crear_registro(payload: s.RegistroIn, user: m.Usuario = Depends(require_rol(
     for f, i, ff in partes:
         pid = payload.periodo_id
         if f != payload.fecha:
-            # La cola cae al día siguiente: puede estar en otro período; reemplaza la cola previa.
-            per_f = db.scalar(select(m.Periodo).where(m.Periodo.fecha_inicio <= f, m.Periodo.fecha_fin >= f))
+            # La cola cae al día siguiente: al período de SU área (no al de otra que solo
+            # comparte la fecha), para que se vea en la grilla del área. Reemplaza la cola previa.
+            per_f = _periodo_de_fecha(db, f, emp.equipo_id)
             pid = per_f.id if per_f else None
             for prev in db.scalars(select(m.RegistroHorario).where(
                     m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == f,
@@ -2389,6 +2480,7 @@ def crear_registro(payload: s.RegistroIn, user: m.Usuario = Depends(require_rol(
     if payload.periodo_id:
         db.flush()
         _reclasificar_periodo_emp(db, emp, per)
+        _traza_edicion_th(db, payload.periodo_id, user, emp, per, "ajustó el horario")
     db.commit()
     reg0 = creados[0]
     db.refresh(reg0)
@@ -2401,14 +2493,38 @@ def borrar_registro(registro_id: str, user: m.Usuario = Depends(require_rol("sup
     if reg:
         emp = _exigir_empleado_visible(db, user, reg.empleado_id)
         per = db.get(m.Periodo, reg.periodo_id) if reg.periodo_id else None
+        if per and _estado_periodo(per) == "cerrado" and user.rol != "super_admin":
+            raise HTTPException(409, "El período ya está cerrado; no se puede modificar.")
+        # La madrugada (00:00) del PRIMER día de un período es la cola de un turno del período
+        # ANTERIOR (pasó del corte por cálculo). Los operativos del nuevo período no la quitan;
+        # solo TH puede (si de verdad hay que corregirla).
+        if reg.hora_inicio == time(0, 0) and per and reg.fecha == per.fecha_inicio:
+            raise HTTPException(409, "Esa madrugada viene del CORTE ANTERIOR: es solo informativa (la ve TH) y NO se puede borrar, ni siquiera por TH. Se conserva para el pago.")
         if reg.periodo_id:
             _guardar_cambio(db, reg.periodo_id, user)
+        # Si este bloque TERMINA a medianoche es la tarde de un turno nocturno partido: su
+        # madrugada (cola 00:00-…) vive el día siguiente. Al borrar la tarde hay que borrar
+        # también la cola; si no, queda HUÉRFANA y se cuenta como bloque del día siguiente
+        # (extra nocturna fantasma). #cola-huerfana
+        per_cola = None
+        if reg.hora_fin == time(0, 0):
+            cola = db.scalar(select(m.RegistroHorario).where(
+                m.RegistroHorario.empleado_id == reg.empleado_id,
+                m.RegistroHorario.fecha == reg.fecha + timedelta(days=1),
+                m.RegistroHorario.hora_inicio == time(0, 0)))
+            if cola:
+                if cola.periodo_id and cola.periodo_id != reg.periodo_id:
+                    per_cola = db.get(m.Periodo, cola.periodo_id)
+                db.delete(cola)
         db.delete(reg)
         # Borrar un día cambia el acumulado semanal: reclasifica lo que quede (#5).
         if emp and per:
             db.flush()
             _reclasificar_periodo_emp(db, emp, per)
+            if per_cola:
+                _reclasificar_periodo_emp(db, emp, per_cola)  # la cola vivía en otro período
             _reevaluar_flujo_area(db, per, emp.equipo_id, user)  # #3
+            _traza_edicion_th(db, reg.periodo_id, user, emp, per, "borró el horario")
         db.commit()
 
 
@@ -2486,65 +2602,13 @@ def investigar_normativa(user: m.Usuario = Depends(require_rol("super_admin")), 
 
 # ── Datos de apoyo ──────────────────────────────────────────────────────────
 @router.get("/festivos", response_model=list[s.FestivoOut])
-def listar_festivos(
-    anio_desde: int = 2026, anio_hasta: int = 2029,
-    _: m.Usuario = Depends(current_user), db: Session = Depends(get_session),
-):
-    """Festivos para el rango de años. Base: cálculo Ley Emiliani + excepciones de TH."""
-    excepciones = db.scalars(
-        select(m.FestivoExcepcion)
-        .where(m.FestivoExcepcion.fecha >= date(anio_desde, 1, 1),
-               m.FestivoExcepcion.fecha <= date(anio_hasta, 12, 31)),
-    ).all()
-    quitar = {e.fecha for e in excepciones if e.tipo == "quitar"}
-    agregar = {e.fecha: (e.motivo or "Festivo especial") for e in excepciones if e.tipo == "agregar"}
-
-    resultado = [
+def listar_festivos(anio_desde: int = 2026, anio_hasta: int = 2029):
+    """Festivos CALCULADOS para el rango de años (sirve para 2027+, #6)."""
+    return [
         {"nombre": n, "fecha_descanso": f}
         for y in range(anio_desde, anio_hasta + 1)
         for f, n in festivos_colombia(y)
-        if f not in quitar
-    ] + [{"nombre": nombre, "fecha_descanso": f} for f, nombre in agregar.items()]
-    return sorted(resultado, key=lambda x: x["fecha_descanso"])
-
-
-@router.get("/admin/festivos/excepciones", response_model=list[s.FestivoExcepcionOut])
-def listar_excepciones(_: m.Usuario = Depends(require_rol("super_admin")), db: Session = Depends(get_session)):
-    """Excepciones que TH agregó al calendario calculado."""
-    return db.scalars(select(m.FestivoExcepcion).order_by(m.FestivoExcepcion.fecha)).all()
-
-
-@router.post("/admin/festivos/excepciones", response_model=s.FestivoExcepcionOut, status_code=201)
-def crear_excepcion(
-    payload: s.FestivoExcepcionIn,
-    user: m.Usuario = Depends(require_rol("super_admin")),
-    db: Session = Depends(get_session),
-):
-    """Agrega o quita un festivo puntual (p. ej. decreto especial, cambio de ley)."""
-    if payload.tipo not in ("agregar", "quitar"):
-        raise HTTPException(400, "tipo debe ser 'agregar' o 'quitar'.")
-    if db.scalar(select(m.FestivoExcepcion).where(m.FestivoExcepcion.fecha == payload.fecha)):
-        raise HTTPException(409, f"Ya existe una excepción para {payload.fecha}.")
-    exc = m.FestivoExcepcion(fecha=payload.fecha, tipo=payload.tipo,
-                              motivo=payload.motivo, creado_por=user.id)
-    db.add(exc)
-    db.commit()
-    db.refresh(exc)
-    return exc
-
-
-@router.delete("/admin/festivos/excepciones/{excepcion_id}", status_code=204)
-def borrar_excepcion(
-    excepcion_id: str,
-    _: m.Usuario = Depends(require_rol("super_admin")),
-    db: Session = Depends(get_session),
-):
-    """Elimina una excepción (restaura el festivo calculado)."""
-    exc = db.get(m.FestivoExcepcion, excepcion_id)
-    if not exc:
-        raise HTTPException(404, "Excepción no encontrada.")
-    db.delete(exc)
-    db.commit()
+    ]
 
 
 @router.get("/notificaciones", response_model=list[s.NotificacionOut])
@@ -2576,9 +2640,30 @@ def marcar_leida(notif_id: str, user: m.Usuario = Depends(current_user), db: Ses
 
 
 @router.get("/dashboard")
-def dashboard(user: m.Usuario = Depends(current_user), db: Session = Depends(get_session)) -> dict:
-    """Agregados para gráficas: horas por categoría, por equipo y fuerza laboral."""
+def dashboard(periodo_id: str | None = None, user: m.Usuario = Depends(current_user), db: Session = Depends(get_session)) -> dict:
+    """Agregados para gráficas: horas por categoría, por equipo y fuerza laboral.
+
+    `periodo_id` (opcional): fuerza el período a mostrar (el selector del resumen). Sin
+    él, se toma la quincena en curso por fecha. Así TH puede seguir viendo/cerrando julio
+    aunque el calendario ya haya entrado en agosto (#no-saltar-solo)."""
     vis = equipos_visibles(user)
+
+    # El GLOBAL da la metadata (nombre, cortes, semanas); pero las áreas con período
+    # PROPIO guardan sus registros con OTRO periodo_id, así que hay que contar TODOS los
+    # períodos de la quincena — que comparten el mismo NOMBRE (p. ej. "NM2QJulio26").
+    hoy = _hoy()
+    if periodo_id:
+        per_abierto = db.get(m.Periodo, periodo_id)
+    else:
+        per_abierto = db.scalar(select(m.Periodo).where(
+            m.Periodo.cerrado_en.is_(None), m.Periodo.equipo_id.is_(None),
+            m.Periodo.fecha_inicio <= hoy, m.Periodo.fecha_fin >= hoy,
+        ).order_by(m.Periodo.fecha_inicio))
+    periodos_q = list(db.scalars(select(m.Periodo).where(
+        m.Periodo.nombre == per_abierto.nombre))) if per_abierto else []
+    global_pid = next((p.id for p in periodos_q if p.equipo_id is None), None)
+    area_pid = {p.equipo_id: p.id for p in periodos_q if p.equipo_id}
+    ids_activos = [p.id for p in periodos_q]
 
     eq_q = select(m.Equipo).where(m.Equipo.activo)
     emp_q = select(m.Empleado).where(m.Empleado.activo, m.Empleado.lleva_horario)  # solo quien lleva horario
@@ -2587,9 +2672,16 @@ def dashboard(user: m.Usuario = Depends(current_user), db: Session = Depends(get
         eq_q = eq_q.where(m.Equipo.id.in_(vis or ["__none__"]))
         emp_q = emp_q.where(m.Empleado.equipo_id.in_(vis or ["__none__"]))
         reg_q = reg_q.where(m.Empleado.equipo_id.in_(vis or ["__none__"]))
+    # Solo registros de la quincena en curso — no mezclar horas de quincenas anteriores.
+    if ids_activos:
+        reg_q = reg_q.where(m.RegistroHorario.periodo_id.in_(ids_activos))
 
     empleados = list(db.scalars(emp_q))
-    registros = list(db.scalars(reg_q))
+    # Cada empleado se cuenta con el período de SU área (o el global): ignora registros mal
+    # archivados en otro período de la misma quincena (no duplicar horas).
+    _eq_de = {e.id: e.equipo_id for e in empleados}
+    registros = [r for r in db.scalars(reg_q)
+                 if r.periodo_id == area_pid.get(_eq_de.get(r.empleado_id), global_pid)]
     # Solo áreas donde alguien lleva horario: Talento Humano usa la herramienta pero no
     # reporta horas, así que no cuenta como área del período ni se le pide reporte.
     con_horario = {e.equipo_id for e in empleados}
@@ -2645,8 +2737,9 @@ def dashboard(user: m.Usuario = Depends(current_user), db: Session = Depends(get
 
     # AJUSTES DE TH: las "horas cargadas" que ven líderes y registradores salen YA con el
     # ajuste aplicado (igual que el reporte a Financiera). La grilla día a día no cambia;
-    # el porqué del ajuste queda en la nota de Consolidado y chat.
-    for a in db.scalars(select(m.AjusteReporte)):
+    # el porqué del ajuste queda en la nota de Consolidado y chat. SOLO los ajustes de la
+    # quincena en curso — si no, un ajuste de julio se sumaba al resumen de agosto.
+    for a in db.scalars(select(m.AjusteReporte).where(m.AjusteReporte.periodo_id.in_(ids_activos or ["__none__"]))):
         if a.empleado_id not in horas_emp:
             continue   # fuera del alcance del usuario (otro equipo)
         horas_emp[a.empleado_id] = round(horas_emp[a.empleado_id] + a.horas, 1)
@@ -2662,7 +2755,6 @@ def dashboard(user: m.Usuario = Depends(current_user), db: Session = Depends(get
 
     # #3 Horas por SEMANA (del período abierto). La semana puede ir partida entre
     # períodos: aquí solo cuenta la parte de este período.
-    per_abierto = db.scalar(select(m.Periodo).where(m.Periodo.estado == "abierto").order_by(m.Periodo.fecha_inicio))
     sem_map, sem_meta = _semanas_de_periodo(per_abierto) if per_abierto else ({}, [])
     sem_emp: dict[str, dict[int, float]] = {e.id: {} for e in empleados}
     if per_abierto:
@@ -2734,7 +2826,11 @@ def enviar_recordatorios(_: m.Usuario = Depends(require_rol("super_admin")), db:
     El envío real usa SMTP (variables de entorno); sin SMTP se registra en el log y
     se crea la notificación en la app.
     """
-    per = db.scalar(select(m.Periodo).where(m.Periodo.estado == "abierto").order_by(m.Periodo.fecha_inicio))
+    hoy = _hoy()
+    per = db.scalar(select(m.Periodo).where(
+        m.Periodo.cerrado_en.is_(None), m.Periodo.equipo_id.is_(None),
+        m.Periodo.fecha_inicio <= hoy, m.Periodo.fecha_fin >= hoy,
+    ).order_by(m.Periodo.fecha_inicio))
     if not per:
         return {"enviados": 0, "detalle": [], "smtp": smtp_configurado(), "mensaje": "No hay período abierto."}
     areas = list(db.scalars(select(m.Equipo).where(m.Equipo.activo).order_by(m.Equipo.nombre)))
