@@ -536,14 +536,15 @@ def crear_solicitud(
     sol = m.Solicitud(empleado_id=emp.id, equipo_id=emp.equipo_id, tipo=payload.tipo,
                       motivo=(payload.motivo or "").strip() or None, creado_por=user.id)
     db.add(sol)
-    # Le llega a la persona de TH encargada, no a todo el rol.
-    for th in _receptores_th(db):
-        db.add(m.Notificacion(
-            rol_destino="super_admin", usuario_id=th.id, tipo="solicitud",
-            titulo=f"{TIPOS_SOLICITUD[payload.tipo]}: {emp.nombre}",
-            descripcion=f"{user.nombre} lo solicita." + (f" Motivo: {sol.motivo}" if sol.motivo else ""),
-            equipo_id=emp.equipo_id,
-        ))
+    # Lo que pide un líder lo ve TODO Talento Humano (super_admin), no solo la persona
+    # designada: un aviso broadcast (usuario_id=None) para que ningún admin se quede sin
+    # enterarse. #notif-todos-th
+    db.add(m.Notificacion(
+        rol_destino="super_admin", tipo="solicitud",
+        titulo=f"{TIPOS_SOLICITUD[payload.tipo]}: {emp.nombre}",
+        descripcion=f"{user.nombre} lo solicita." + (f" Motivo: {sol.motivo}" if sol.motivo else ""),
+        equipo_id=emp.equipo_id,
+    ))
     db.commit()
     db.refresh(sol)
     return _solicitud_out(db, sol)
@@ -1345,6 +1346,15 @@ def reabrir_periodo(
     per.cerrado_en = None
     per.estado = "abierto"   # reabierto = vuelve a estar EN CURSO (el estado real se calcula por fechas)
     eq_filtro = payload.equipo_id if payload else None
+    # Se cerraron en cascada, se reabren en cascada: los períodos PROPIOS de área de la misma
+    # quincena vuelven a estar EN CURSO junto con el global (con equipo_id, solo el de esa
+    # área). Si no, quedarían "cerrado" mientras el global está abierto. #cierre-cascada
+    if per.equipo_id is None:
+        hq = select(m.Periodo).where(m.Periodo.nombre == per.nombre, m.Periodo.id != per.id)
+        if eq_filtro:
+            hq = hq.where(m.Periodo.equipo_id == eq_filtro)
+        for hermano in db.scalars(hq):
+            hermano.cerrado_en = None
     q = select(m.PeriodoEquipo).where(m.PeriodoEquipo.periodo_id == per.id)
     if eq_filtro:
         q = q.where(m.PeriodoEquipo.equipo_id == eq_filtro)
@@ -1495,6 +1505,15 @@ def cerrar_periodo(periodo_id: str, _: m.Usuario = Depends(require_rol("super_ad
         raise HTTPException(409, "No se puede enviar a financiera / cerrar: " + "; ".join(faltantes) + ".")
     per.estado = "cerrado"
     per.cerrado_en = m.ahora_bogota()
+    # La quincena se cierra COMPLETA: las áreas con período PROPIO (misma quincena = mismo
+    # nombre) se cierran junto con el global. Si no, el registrador/líder se quedan viendo su
+    # período viejo como "en curso" y su consolidado NUNCA aparece en el Historial (que solo
+    # agrupa lo 'cerrado') — #12.1: a lo sumo 1 período abierto por área. #cierre-cascada
+    if per.equipo_id is None:
+        for hermano in db.scalars(select(m.Periodo).where(
+                m.Periodo.nombre == per.nombre, m.Periodo.id != per.id,
+                m.Periodo.cerrado_en.is_(None))):
+            hermano.cerrado_en = per.cerrado_en
     db.commit()
     db.refresh(per)
     return per
