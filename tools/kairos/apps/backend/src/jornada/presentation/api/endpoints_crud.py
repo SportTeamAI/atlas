@@ -1515,6 +1515,12 @@ def cerrar_periodo(periodo_id: str, _: m.Usuario = Depends(require_rol("super_ad
         faltantes.append("no hay horas registradas en el período")
     if faltantes:
         raise HTTPException(409, "No se puede enviar a financiera / cerrar: " + "; ".join(faltantes) + ".")
+    # #8 RECÁLCULO AL CIERRE: antes de cerrar, recomputa extras (tope semanal 42 h desde el
+    # 15-jul), recargos (festivo/dominical/nocturno siempre) y novedades de todos los que llevan
+    # horario, para que el reporte a Financiera salga con las cifras FINALES ya que la semana
+    # está completa. La reclasificación es idempotente: si ya estaba bien, no cambia nada.
+    for emp in db.scalars(select(m.Empleado).where(m.Empleado.activo, m.Empleado.lleva_horario)):
+        _reclasificar_periodo_emp(db, emp, per)
     per.estado = "cerrado"
     per.cerrado_en = m.ahora_bogota()
     # La quincena se cierra COMPLETA: las áreas con período PROPIO (misma quincena = mismo
@@ -1529,6 +1535,21 @@ def cerrar_periodo(periodo_id: str, _: m.Usuario = Depends(require_rol("super_ad
     db.commit()
     db.refresh(per)
     return per
+
+
+@router.post("/periodos/{periodo_id}/recalcular")
+def recalcular_periodo(periodo_id: str, _: m.Usuario = Depends(require_rol("super_admin")), db: Session = Depends(get_session)) -> dict:
+    """#8 Recalcula extras (tope semanal 42 h), recargos y novedades de TODO el período —para
+    revisar las cifras finales el día del corte ANTES de cerrar. No cambia el estado del período."""
+    per = db.get(m.Periodo, periodo_id)
+    if not per:
+        raise HTTPException(404, "Período no encontrado.")
+    n = 0
+    for emp in db.scalars(select(m.Empleado).where(m.Empleado.activo, m.Empleado.lleva_horario)):
+        _reclasificar_periodo_emp(db, emp, per)
+        n += 1
+    db.commit()
+    return {"recalculados": n}
 
 
 # ── Validación del líder + comentarios estilo red social ─────────────────────
