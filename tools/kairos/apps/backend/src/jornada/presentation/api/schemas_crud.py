@@ -288,6 +288,13 @@ class AplicarTurnoIn(BaseModel):
     sobrescribir: bool = True
 
 
+class BloqueManual(BaseModel):
+    """#4 Un tramo de horario del día. Sirve para cargar VARIOS bloques el mismo día
+    (ej. Envío de Reporte: 7-8, 12-1, 5-6)."""
+    hora_inicio: time
+    hora_fin: time
+
+
 class AsignarIn(BaseModel):
     """Asignación flexible: a varios empleados, un horario, en el alcance elegido.
 
@@ -313,6 +320,8 @@ class AsignarIn(BaseModel):
     es_guardia: bool = False
     # QUITAR: borra el horario/novedad de los días elegidos (deshacer).
     es_quitar: bool = False
+    # #4 Varios bloques el MISMO día (ej. 7-8, 12-1, 5-6): reemplazan el día y se ponen TODOS.
+    bloques: list[BloqueManual] | None = None
 
 
 class ConfigRecargoOut(_ORM):

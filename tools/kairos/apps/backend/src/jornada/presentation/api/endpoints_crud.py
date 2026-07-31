@@ -2160,6 +2160,49 @@ def asignar(
         db.commit()
         return {"creados": creados}
 
+    # #4 VARIOS bloques el mismo día (ej. 7-8, 12-1, 5-6). Se aplican TODOS: reemplaza los
+    # bloques propios del día y agrega cada tramo (sin almuerzo: los huecos ya son el descanso).
+    if payload.bloques:
+        creados = 0
+        for emp in empleados:
+            descanso = _DIAS.get((emp.dia_descanso or "").lower(), 6)
+            for dia in dias:
+                if salta_descanso and dia.weekday() == descanso:
+                    continue
+                nov_dia = db.scalar(select(m.Novedad).where(
+                    m.Novedad.empleado_id == emp.id, m.Novedad.fecha_inicio <= dia, m.Novedad.fecha_fin >= dia))
+                if nov_dia:
+                    if salta_descanso or nov_dia.tipo not in ("DESCANSO", "GUARDIA"):
+                        continue
+                    db.delete(nov_dia)
+                # Reemplaza los bloques PROPIOS del día (nunca la cola heredada 00:00 del 1er día).
+                for p in db.scalars(select(m.RegistroHorario).where(
+                        m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == dia,
+                        m.RegistroHorario.hora_inicio != time(0, 0))):
+                    db.delete(p)
+                for blq in payload.bloques:
+                    for f, i, ff in _partir_medianoche(dia, blq.hora_inicio, blq.hora_fin):
+                        pid = per.id
+                        if f != dia:
+                            per_f = _periodo_de_fecha(db, f, emp.equipo_id)
+                            pid = per_f.id if per_f else per.id
+                            for prev in db.scalars(select(m.RegistroHorario).where(
+                                    m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == f,
+                                    m.RegistroHorario.hora_inicio == time(0, 0))):
+                                db.delete(prev)
+                        r, segs = _clasificar(emp, f, i, ff, 0.0, f.weekday() == descanso)
+                        db.add(m.RegistroHorario(
+                            empleado_id=emp.id, periodo_id=pid, fecha=f,
+                            hora_inicio=i, hora_fin=ff, tiempo_alimentacion_h=0.0,
+                            duracion_bruta_h=r.gross_hours, duracion_neta_h=r.net_hours,
+                            tipo_descanso=r.rest_type.value if r.rest_type else None, clasificacion=segs, estado="pendiente"))
+                        creados += 1
+        db.flush()
+        for emp in empleados:
+            _reclasificar_periodo_emp(db, emp, per)
+        db.commit()
+        return {"creados": creados}
+
     # #3 Horario MANUAL (fuera del catálogo): se aplica tal cual, sin guardar turno
     # ni mandar recomendación.
     manual = payload.hora_inicio is not None and payload.hora_fin is not None
