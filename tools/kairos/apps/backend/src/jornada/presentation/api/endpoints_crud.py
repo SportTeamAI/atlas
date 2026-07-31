@@ -930,7 +930,19 @@ def listar_empleados(
         q = q.where(m.Empleado.equipo_id.in_(vis or ["__none__"]))
     if equipo_id:
         q = q.where(m.Empleado.equipo_id == equipo_id)
-    return list(db.scalars(q.order_by(m.Empleado.nombre)))
+    emps = list(db.scalars(q.order_by(m.Empleado.nombre)))
+    # Rol de la CUENTA de cada quien (login), cruzado por correo, para llenar la columna "Rol"
+    # de Mi equipo a todos los roles. Solo cuentas ACTIVAS; None si la persona no tiene login.
+    # #rol-en-empleado
+    correos = {e.email.lower() for e in emps if e.email}
+    rol_por_correo: dict[str, str] = {}
+    if correos:
+        rol_por_correo = {u.email.lower(): u.rol for u in db.scalars(
+            select(m.Usuario).where(m.Usuario.activo))
+            if u.email and u.email.lower() in correos}
+    for e in emps:
+        e.rol_acceso = rol_por_correo.get((e.email or "").lower())
+    return emps
 
 
 @router.post("/empleados", response_model=s.EmpleadoOut, status_code=201)

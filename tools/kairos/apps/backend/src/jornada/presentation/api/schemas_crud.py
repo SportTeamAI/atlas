@@ -175,6 +175,10 @@ class EmpleadoOut(_ORM):
     dia_descanso: str
     activo: bool
     lleva_horario: bool = True   # ¿aparece en grillas/reportes? (TH no; líderes solo si trabajan turnos)
+    # Rol de la CUENTA de login de esta persona (super_admin|lider|registrador), cruzado por
+    # correo; None si no tiene login. Así "Mi equipo" muestra el rol a TODOS (registrador
+    # incluido) sin pedir el panel de accesos (que trae los enlaces sensibles). #rol-en-empleado
+    rol_acceso: str | None = None
 
 
 class EmpleadoIn(BaseModel):
