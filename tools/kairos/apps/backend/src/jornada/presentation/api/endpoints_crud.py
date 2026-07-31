@@ -1483,6 +1483,7 @@ def enviar_periodo(
     pe = _ensure_pe(db, periodo_id, user.equipo_id)
     if pe.estado_flujo not in ("validado", "en_th"):
         raise HTTPException(409, "El líder debe validar antes de enviar a Talento Humano.")
+    _validar_area_lista(db, per, user.equipo_id)  # #7: no enviar a TH con horarios incompletos
     eq = db.get(m.Equipo, user.equipo_id)
     area = eq.nombre if eq else "un equipo"
     pe.estado_flujo = "en_th"
@@ -1545,6 +1546,7 @@ def validar_lider(
         raise HTTPException(400, "Tu usuario no tiene equipo asignado.")
     area = "el equipo"
     if user.equipo_id:
+        _validar_area_lista(db, per, user.equipo_id)  # #7: no validar con horarios incompletos
         pe = _ensure_pe(db, periodo_id, user.equipo_id)
         pe.estado_flujo = "validado"
         pe.validado_lider = True
