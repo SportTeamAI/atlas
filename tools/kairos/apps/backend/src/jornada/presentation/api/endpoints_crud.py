@@ -1407,14 +1407,13 @@ def _validar_area_lista(db: Session, per: m.Periodo, equipo_id: str) -> None:
         d = max(n.fecha_inicio, per.fecha_inicio)
         while d <= min(n.fecha_fin, per.fecha_fin):
             cubierto.add((n.empleado_id, d)); d += timedelta(days=1)
-    # #2/#4 El día de descanso semanal (domingo) y el SÁBADO no se exigen: si no se
-    # marca nada, son descanso por defecto (semana L-V). Solo se cuentan como
-    # faltantes los días L-V sin turno/licencia/descanso explícito.
+    # #2 NADA puede quedar en "–" antes de enviar/validar: se exigen TODOS los días con algo
+    # (turno, licencia, DESCANSO o GUARDIA). Antes se perdonaban sábado/domingo como descanso
+    # por defecto; ya no — hay que marcarlos (el botón "Rellenar" y "Descanso"/"Guardia" lo
+    # hacen en un clic). La cola heredada del 1er día ya cuenta como cubierta.
     faltantes = []
     for e in emps:
-        descanso = _DIAS.get((e.dia_descanso or "").lower(), 6)
-        n_falta = sum(1 for d in dias if (e.id, d) not in cubierto
-                      and d.weekday() != descanso and d.weekday() != 5)
+        n_falta = sum(1 for d in dias if (e.id, d) not in cubierto)
         if n_falta:
             faltantes.append({"nombre": e.nombre, "faltan": n_falta})
     # #1 Ordenado: primero a quienes más días les faltan, luego alfabético.
@@ -2136,6 +2135,31 @@ def asignar(
         db.commit()
         return {"creados": creados}
 
+    # #5 Marcar como GUARDIA (disponibilidad): igual que el descanso —cubre el día y NO suma
+    # horas— pero se guarda como novedad "GUARDIA" para que la grilla diga "Guardia".
+    if payload.es_guardia:
+        creados = 0
+        for emp in empleados:
+            for dia in dias:
+                for prev in db.scalars(select(m.RegistroHorario).where(
+                        m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == dia)):
+                    if prev.hora_inicio == time(0, 0) and dia == per.fecha_inicio:
+                        continue   # la cola heredada del corte anterior NUNCA se toca (#cola-heredada)
+                    db.delete(prev)
+                nov = db.scalar(select(m.Novedad).where(
+                    m.Novedad.empleado_id == emp.id,
+                    m.Novedad.fecha_inicio <= dia, m.Novedad.fecha_fin >= dia))
+                if nov:
+                    db.delete(nov)
+                db.add(m.Novedad(empleado_id=emp.id, periodo_id=per.id, fecha_inicio=dia,
+                                 fecha_fin=dia, tipo="GUARDIA", es_remunerada=True))
+                creados += 1
+        db.flush()
+        for emp in empleados:
+            _reclasificar_periodo_emp(db, emp, per)
+        db.commit()
+        return {"creados": creados}
+
     # #3 Horario MANUAL (fuera del catálogo): se aplica tal cual, sin guardar turno
     # ni mandar recomendación.
     manual = payload.hora_inicio is not None and payload.hora_fin is not None
@@ -2157,9 +2181,9 @@ def asignar(
             nov_dia = db.scalar(select(m.Novedad).where(
                 m.Novedad.empleado_id == emp.id, m.Novedad.fecha_inicio <= dia, m.Novedad.fecha_fin >= dia))
             if nov_dia:
-                # Un DESCANSO en un día ELEGIDO explícitamente se reemplaza por el turno (igual
-                # que el editor por día). Una licencia/beneficio (ausencia real) NO se pisa.
-                if salta_descanso or nov_dia.tipo != "DESCANSO":
+                # Un DESCANSO o GUARDIA en un día ELEGIDO explícitamente se reemplaza por el
+                # turno (igual que el editor por día). Una licencia/beneficio (ausencia real) NO.
+                if salta_descanso or nov_dia.tipo not in ("DESCANSO", "GUARDIA"):
                     continue
                 db.delete(nov_dia)
             # Turno PROPIO del día = los que NO son cola (00:00-…) del día anterior.
@@ -2311,10 +2335,10 @@ def reporte_periodo(periodo_id: str, user: m.Usuario = Depends(current_user), db
         if fin >= ini and n.empleado_id in agg:
             dias_n = (fin - ini).days + 1
             agg[n.empleado_id]["nov_dias"] += dias_n
-            # #10 El DESCANSO es descanso semanal (aparte). Para licencias/beneficios:
-            # las REMUNERADAS pagan la jornada del día (cuenta en el total y en LIC_REM);
-            # las NO remuneradas no suman horas (solo se cuentan los días).
-            if n.tipo != "DESCANSO":
+            # #10 El DESCANSO y la GUARDIA (#5) son marcadores de agenda: 0 horas, no pagan
+            # jornada. Para licencias/beneficios: las REMUNERADAS pagan la jornada del día
+            # (cuenta en el total y en LIC_REM); las NO remuneradas solo cuentan los días.
+            if n.tipo not in ("DESCANSO", "GUARDIA"):
                 frac = n.fraccion_dia if n.fraccion_dia else 1.0
                 if n.es_remunerada:
                     e = emp_by_id.get(n.empleado_id)

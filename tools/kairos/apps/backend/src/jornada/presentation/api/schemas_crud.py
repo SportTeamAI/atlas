@@ -308,6 +308,9 @@ class AsignarIn(BaseModel):
     meal_min: int | None = None
     # Marcar los días elegidos como DESCANSO (en vez de un horario).
     es_descanso: bool = False
+    # #5 GUARDIA (disponibilidad): como el descanso, cubre el día y NO suma horas, pero se
+    # muestra "Guardia" (áreas como Incidentes que quedan pendientes sin turno fijo).
+    es_guardia: bool = False
     # QUITAR: borra el horario/novedad de los días elegidos (deshacer).
     es_quitar: bool = False
 
