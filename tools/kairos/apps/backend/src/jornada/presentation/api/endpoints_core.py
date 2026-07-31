@@ -52,17 +52,21 @@ def rol_en(db: Session, usuario: m.Usuario, slug: str) -> str | None:
 
 @router.get("/mis-herramientas", response_model=list[s.HerramientaOut])
 def mis_herramientas(user: m.Usuario = Depends(current_user), db: Session = Depends(get_session)):
-    """Lo que esta persona puede abrir desde el hub. Es la lista que pinta Atlas."""
-    filas = db.execute(
-        select(m.Herramienta, m.Permiso.rol).join(m.Permiso, m.Permiso.herramienta_id == m.Herramienta.id)
-        .where(m.Permiso.usuario_id == user.id, m.Herramienta.activa)
-        .order_by(m.Herramienta.orden),
-    ).all()
-    return [
-        s.HerramientaOut(id=h.id, slug=h.slug, nombre=h.nombre, descripcion=h.descripcion,
-                         ruta=h.ruta, roles=h.roles, activa=h.activa, mi_rol=rol)
-        for h, rol in filas
-    ]
+    """Lo que esta persona puede abrir desde el hub. Una herramienta se ve si tiene un PERMISO
+    explícito O si el ROL del usuario está en los `roles` de la herramienta (kairos = registrador/
+    lider/super_admin). Así, dar acceso en Kairos —que fija el rol del usuario— YA habilita la
+    herramienta sin tener que crear un permiso aparte; antes exigía permiso y los registradores/
+    líderes veían el hub VACÍO. #acceso-por-rol"""
+    permisos = {p.herramienta_id: p.rol for p in db.scalars(
+        select(m.Permiso).where(m.Permiso.usuario_id == user.id))}
+    salida = []
+    for h in db.scalars(select(m.Herramienta).where(m.Herramienta.activa).order_by(m.Herramienta.orden)):
+        rol = permisos.get(h.id) or (user.rol if user.rol in (h.roles or []) else None)
+        if rol is None:
+            continue
+        salida.append(s.HerramientaOut(id=h.id, slug=h.slug, nombre=h.nombre, descripcion=h.descripcion,
+                                       ruta=h.ruta, roles=h.roles, activa=h.activa, mi_rol=rol))
+    return salida
 
 
 @router.get("/herramientas", response_model=list[s.HerramientaOut])
