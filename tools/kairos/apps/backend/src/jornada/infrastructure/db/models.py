@@ -36,6 +36,10 @@ class Equipo(Base):
     # repiten nombres de área (p. ej. "Audiovisual" existe en las dos): el match del sync va
     # por `buk_area_id`, NUNCA por nombre, y `empresa` las separa en la UI.
     buk_area_id: Mapped[int | None] = mapped_column(default=None)
+    # Fusión manual permanente: si apunta a otro equipo, la gente de ESTA área (incluidos los
+    # ingresos nuevos que trae Buk) se coloca en el equipo destino. Se usó para unir en "CRM"
+    # las áreas de Buk Operaciones y Estrategias Comerciales. El sync sigue este puntero.
+    fusionado_en: Mapped[str | None] = mapped_column(String(32), default=None)
     empresa: Mapped[str | None] = mapped_column(String(60), default=None)
     descripcion: Mapped[str | None] = mapped_column(String(255), default=None)
     lider_id: Mapped[str | None] = mapped_column(ForeignKey("usuarios.id"), default=None)

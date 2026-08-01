@@ -101,12 +101,15 @@ def sincronizar(db: Session) -> dict[str, Any]:
     db.commit()
 
     # 2) PERSONAS
+    por_id = {e.id: e for e in db.scalars(select(m.Equipo))}  # para seguir fusiones de área
     nuestros = {_ced(e.cedula): e for e in db.scalars(select(m.Empleado))}
     actualizados, sin_cambios, creados, movidos = 0, 0, 0, 0
     for d in colabs:
         if not d["cedula"]:
             continue
         eq = por_buk_id.get(d["area_id"])
+        if eq and eq.fusionado_en:                       # área fusionada → su gente va al equipo destino
+            eq = por_id.get(eq.fusionado_en) or eq
         emp = nuestros.get(d["cedula"])
         if not emp:
             if not eq:
