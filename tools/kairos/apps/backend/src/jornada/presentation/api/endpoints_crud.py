@@ -966,6 +966,11 @@ def editar_empleado(
     if not emp:
         raise HTTPException(404, "Empleado no encontrado.")
     datos = payload.model_dump(exclude_none=True)
+    # #1 Cambiar de área A MANO lo marca como MANUAL: la sincronización de Buk NO revierte el
+    # área de quien se movió aquí (solo mueve a quien no se tocó). Si no, el re-sync deshacía
+    # el cambio y la persona volvía a su área de Buk. #equipo-manual
+    if datos.get("equipo_id") and datos["equipo_id"] != emp.equipo_id:
+        emp.equipo_manual = True
     for k, v in datos.items():
         setattr(emp, k, v)
     if datos.get("lleva_horario"):
