@@ -202,19 +202,14 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
     sin_extras = jt_base in (JornadaType.TURNO_CONTINUO, JornadaType.DIRECCION_CONFIANZA)
     eq_area = db.get(m.Equipo, emp.equipo_id) if emp.equipo_id else None
     alm_area_h = (eq_area.almuerzo_min or 0) / 60.0 if eq_area else 0.0
-    # Regla de extras: por defecto DÍA A DÍA para TODOS (extra = lo que pase de la
-    # jornada diaria). La ÚNICA excepción son las semanas que TIENEN un festivo: en esas
-    # semanas, Deportivas y Operaciones Comerciales pasan a acumulado SEMANAL (sumatorio);
-    # SAC/Riesgos/Incidentes se quedan día a día siempre.
-    equipo_siempre_diario = bool(eq_area and (eq_area.nombre or "").strip().lower() in _EQUIPOS_EXTRAS_DIARIAS)
+    # Regla de extras (CST, Ley 2466/2025): SIEMPRE por acumulado SEMANAL (semana ISO
+    # lunes→domingo). La hora extra aparece SOLO cuando el acumulado de la semana supera el
+    # máximo legal vigente (42 h desde el 15-jul-2026) y cae en el ÚLTIMO día trabajado de
+    # la semana. Aplica a TODOS los equipos por igual. Festivos/domingos NO son extra por sí
+    # solos: suman al tope semanal y se pagan con su recargo. La semana puede CRUZAR el borde
+    # del período: se acumulan también los registros de la quincena vecina que comparten
+    # semana (ver abajo), para saber si de verdad se pasan las 42 h.
     lim_dia = emp.jornada_horas_dia or 8.0
-    # Semanas ISO (dentro del rango del período) que CONTIENEN algún festivo.
-    semanas_festivo: set[tuple[int, int]] = set()
-    _d = ini_semana
-    while _d <= fin_semana:
-        if es_festivo(_d):
-            semanas_festivo.add(_d.isocalendar()[:2])
-        _d += timedelta(days=1)
     acc: dict[tuple[int, int], float] = {}
     acc_dia: dict[date, float] = {}   # trabajo (neto) acumulado por DÍA (extras diarias)
     meal_dias: set[date] = set()      # días a los que ya se les descontó el almuerzo (1 vez/día)
@@ -237,14 +232,13 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
         # siendo cola: si no, se contaría como el 1er bloque del día y volvería EXTRA el
         # turno de la tarde de ESE día (extra nocturna fantasma). #cola-huerfana
         es_cola = reg.hora_inicio == _MID
-        # Día a día para todos, SALVO Deportivas/Operaciones en semanas con festivo, que
-        # van por acumulado SEMANAL (sumatorio). SAC/Riesgos/Incidentes: siempre diario.
-        semana_diaria = equipo_siempre_diario or (wk not in semanas_festivo)
-        dia_diario = (not sin_extras) and semana_diaria
+        # Extras SIEMPRE por acumulado semanal (tope 42 h). Solo las jornadas SIN extras
+        # (turno continuo / dirección-confianza) quedan al margen del tope.
+        dia_diario = False
         if reg.periodo_id != per.id:
-            # Otra quincena, misma semana: solo suma al acumulado semanal los días de
-            # semanas que de verdad usan la regla semanal (las diarias no entran).
-            if not (sin_extras or semana_diaria):
+            # Otra quincena, MISMA semana: suma su neto ya guardado al acumulado semanal
+            # (así una semana partida entre dos períodos se completa y se sabe si pasa de 42 h).
+            if not sin_extras:
                 acc[wk] = antes + (reg.duracion_neta_h or 0.0)
             continue
         # Alimentación: el almuerzo se descuenta SIEMPRE (también en domingo/festivo y en
