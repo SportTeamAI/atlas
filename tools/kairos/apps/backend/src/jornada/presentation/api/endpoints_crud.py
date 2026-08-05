@@ -2455,6 +2455,19 @@ def reporte_periodo(periodo_id: str, user: m.Usuario = Depends(current_user), db
         agg[a.empleado_id]["total"] = round(agg[a.empleado_id]["total"] + a.horas, 2)
         ajustes_emp.setdefault(a.empleado_id, []).append({"categoria": a.categoria, "horas": a.horas, "motivo": a.motivo})
 
+    # #reporte-semana-partida: si la 1ª semana del período es PARTIDA (empezó en la quincena
+    # ANTERIOR), suma por empleado las horas de esa semana ISO que están en el período anterior,
+    # para que el reporte muestre en SEM 1 "esta parte + semana anterior = semana real" (la
+    # ÚLTIMA semana partida NO se completa: sería mirar al futuro).
+    prev_sem: dict[str, float] = {}
+    if sem_meta and sem_meta[0]["parcial"]:
+        _lun_prim = date.fromisoformat(sem_meta[0]["semana_iso"].split(" → ")[0])
+        if _lun_prim < per.fecha_inicio:
+            for r in db.scalars(select(m.RegistroHorario).where(
+                    m.RegistroHorario.fecha >= _lun_prim, m.RegistroHorario.fecha < per.fecha_inicio,
+                    m.RegistroHorario.empleado_id.in_([e.id for e in empleados]))):
+                prev_sem[r.empleado_id] = round(prev_sem.get(r.empleado_id, 0.0) + (r.duracion_neta_h or 0.0), 2)
+
     filas = [{
         "empleado_id": e.id, "nombre": e.nombre, "tipo_jornada": e.tipo_jornada,
         "total_neto": agg[e.id]["total"],
@@ -2464,6 +2477,7 @@ def reporte_periodo(periodo_id: str, user: m.Usuario = Depends(current_user), db
         "licencia_norem_dias": agg[e.id]["lic_norem_dias"],
         "ajustes": ajustes_emp.get(e.id, []),   # ajustes de TH aplicados a esta fila
         "semanas": [round(agg[e.id]["sem"].get(sm["n"], 0.0), 2) for sm in sem_meta],  # #3
+        "sem1_previa": prev_sem.get(e.id, 0.0),   # horas de la semana anterior (SEM 1 partida)
     } for e in empleados]
 
     return {
