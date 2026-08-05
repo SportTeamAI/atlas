@@ -2226,6 +2226,13 @@ def asignar(
                         m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == dia,
                         m.RegistroHorario.hora_inicio != time(0, 0))):
                     db.delete(p)
+                # #cola-huerfana-prev: quita la COLA vieja (madrugada 00:00) del día SIGUIENTE que
+                # dejó el turno anterior de ESTE día. Si el nuevo turno cruza medianoche se recrea
+                # abajo; si es de día, queda bien quitada (no huérfana).
+                for cph in db.scalars(select(m.RegistroHorario).where(
+                        m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == dia + timedelta(days=1),
+                        m.RegistroHorario.hora_inicio == time(0, 0))):
+                    db.delete(cph)
                 for blq in payload.bloques:
                     for f, i, ff in _partir_medianoche(dia, blq.hora_inicio, blq.hora_fin):
                         pid = per.id
@@ -2283,6 +2290,14 @@ def asignar(
                 continue
             for p in propios:
                 db.delete(p)
+            # #cola-huerfana-prev: al reemplazar el turno del día, quita la COLA vieja (madrugada
+            # 00:00) del día SIGUIENTE que dejó el turno anterior de este día. Si el nuevo turno
+            # cruza medianoche se recrea abajo; si es de día, queda bien quitada (no huérfana).
+            if propios:
+                for cph in db.scalars(select(m.RegistroHorario).where(
+                        m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == dia + timedelta(days=1),
+                        m.RegistroHorario.hora_inicio == time(0, 0))):
+                    db.delete(cph)
             # Partir el turno por medianoche: la parte de después de 00:00 pasa al día
             # siguiente (cuenta en SU día, aunque sea descanso). Reemplaza la cola previa.
             for f, i, ff in _partir_medianoche(dia, ini, fin):
