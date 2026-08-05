@@ -177,6 +177,9 @@ class Empleado(Base):
     horario_inicio_habitual: Mapped[time | None] = mapped_column(Time, default=None)
     horario_fin_habitual: Mapped[time | None] = mapped_column(Time, default=None)
     dia_descanso: Mapped[str] = mapped_column(String(10), default="domingo")
+    # Almuerzo PROPIO en minutos (#4): si está seteado, MANDA sobre el del área. Ej.: Andrea
+    # (SAC descuenta 30 min por área) tiene 1 h de almuerzo → 60. None = usa el del área.
+    almuerzo_min: Mapped[int | None] = mapped_column(default=None)
     fecha_ingreso: Mapped[date | None] = mapped_column(Date, default=None)
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime, default=ahora_bogota)

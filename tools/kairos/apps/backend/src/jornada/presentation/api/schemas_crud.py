@@ -179,6 +179,7 @@ class EmpleadoOut(_ORM):
     # correo; None si no tiene login. Así "Mi equipo" muestra el rol a TODOS (registrador
     # incluido) sin pedir el panel de accesos (que trae los enlaces sensibles). #rol-en-empleado
     rol_acceso: str | None = None
+    almuerzo_min: int | None = None   # almuerzo PROPIO (min); None = usa el del área (#4)
 
 
 class EmpleadoIn(BaseModel):
@@ -214,6 +215,7 @@ class EmpleadoPatch(BaseModel):
     horario_fin_habitual: time | None = None
     dia_descanso: str | None = None
     activo: bool | None = None
+    almuerzo_min: int | None = None   # almuerzo PROPIO (min); manda sobre el del área (#4)
 
 
 class EquipoIn(BaseModel):

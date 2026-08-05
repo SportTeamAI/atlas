@@ -201,7 +201,9 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
     # Turno continuo / dirección-confianza no generan extras ni recargos: se respetan.
     sin_extras = jt_base in (JornadaType.TURNO_CONTINUO, JornadaType.DIRECCION_CONFIANZA)
     eq_area = db.get(m.Equipo, emp.equipo_id) if emp.equipo_id else None
-    alm_area_h = (eq_area.almuerzo_min or 0) / 60.0 if eq_area else 0.0
+    # Almuerzo por EMPLEADO manda sobre el del área (#4): p. ej. Andrea = 1 h aunque SAC use 30 min.
+    _alm_min = emp.almuerzo_min if emp.almuerzo_min is not None else (eq_area.almuerzo_min if eq_area else 0)
+    alm_area_h = (_alm_min or 0) / 60.0
     # Regla de extras (CST, Ley 2466/2025): SIEMPRE por acumulado SEMANAL (semana ISO
     # lunes→domingo). La hora extra aparece SOLO cuando el acumulado de la semana supera el
     # máximo legal vigente (42 h desde el 15-jul-2026) y cae en el ÚLTIMO día trabajado de
@@ -459,7 +461,14 @@ def toggle_registrador(
                 _generar_acceso(db, emp, "registrador")
         elif u and u.rol == "registrador":
             u.activo = False
-    # Sin notificación por cada cambio (evita spam): TH lo ve en su Configuración.
+    # #6 Cambio que afecta a UN área (quién registra): notificar SOLO a esa área (su líder y
+    # registradores), no a toda la empresa. equipo_id = el área del empleado.
+    if emp.equipo_id:
+        _accion = "designado como registrador" if activar else "retirado como registrador"
+        for rol in ("lider", "registrador"):
+            db.add(m.Notificacion(rol_destino=rol, equipo_id=emp.equipo_id, tipo="CAMBIO_CONFIG",
+                                  titulo="Cambio de quién registra en tu área",
+                                  descripcion=f"{emp.nombre} fue {_accion}."))
     db.commit()
     db.refresh(emp)
     return emp
@@ -1794,6 +1803,13 @@ def crear_beneficio(payload: s.BeneficioIn, _: m.Usuario = Depends(require_rol("
         raise HTTPException(409, "Ya existe un beneficio con ese nombre.")
     b = m.BeneficioLicencia(**payload.model_dump())
     db.add(b)
+    # #6 Un beneficio nuevo aplica a TODA la empresa → notificación a todos (equipo_id=None = todas
+    # las áreas), una por rol para que llegue a TH, líderes y registradores.
+    _rem = "remunerado" if getattr(b, "remunerada", False) else "no remunerado"
+    _desc = f"Nuevo beneficio de empresa: {b.nombre}" + (f" · {b.dias} día(s)" if getattr(b, "dias", None) else "") + f" · {_rem}."
+    for rol in ("super_admin", "lider", "registrador"):
+        db.add(m.Notificacion(rol_destino=rol, tipo="BENEFICIO",
+                              titulo=f"Nuevo beneficio: {b.nombre}", descripcion=_desc))
     db.commit()
     db.refresh(b)
     return b
