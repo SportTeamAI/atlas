@@ -219,7 +219,12 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
     # Antes se asumían 8 h por día previo, lo que inflaba extras fantasma cuando la
     # semana anterior no tenía datos (p. ej. un domingo salía con extra sin deberlo).
     for reg in regs:
-        wk = reg.fecha.isocalendar()[:2]
+        # #punto5 La cola (madrugada 00:00-…) es la CONTINUACIÓN del turno del día ANTERIOR: para
+        # el TOPE de 42h cuenta en la semana del día en que ARRANCÓ el turno, NO en la del
+        # calendario de la madrugada. Así un turno del domingo que cruza al lunes completa las
+        # 42h de la semana del DOMINGO (y no arranca extras falsas en la semana nueva).
+        es_cola = reg.hora_inicio == _MID
+        wk = (reg.fecha - timedelta(days=1)).isocalendar()[:2] if es_cola else reg.fecha.isocalendar()[:2]
         antes = acc.get(wk, 0.0)
         es_fest = es_festivo(reg.fecha)
         # ¿Es la "cola" (00:00-…) de un turno que arrancó el día anterior? Entonces es
@@ -230,8 +235,8 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
         # nocturno partido. Aunque su turno base del día anterior ya no exista (quedó
         # HUÉRFANA porque se borró el turno de la tarde y sobró la madrugada), sigue
         # siendo cola: si no, se contaría como el 1er bloque del día y volvería EXTRA el
-        # turno de la tarde de ESE día (extra nocturna fantasma). #cola-huerfana
-        es_cola = reg.hora_inicio == _MID
+        # turno de la tarde de ESE día (extra nocturna fantasma). #cola-huerfana (es_cola ya
+        # se calculó arriba, junto con la semana a la que cuenta —la del día que arrancó).
         # Extras SIEMPRE por acumulado semanal (tope 42 h). Solo las jornadas SIN extras
         # (turno continuo / dirección-confianza) quedan al margen del tope.
         dia_diario = False
@@ -1366,15 +1371,6 @@ def reabrir_periodo(
             hq = hq.where(m.Periodo.equipo_id == eq_filtro)
         for hermano in db.scalars(hq):
             hermano.cerrado_en = None
-    else:
-        # Reabrir un ÁREA suelta: reabre TAMBIÉN el período GLOBAL de la misma quincena. El
-        # selector del front va por el período global; si queda cerrado, el área reabierta se ve
-        # "vacía" aunque sus horas estén intactas. Las demás áreas siguen cerradas (solo esta
-        # queda editable). #reabrir-area-visible
-        glob = db.scalar(select(m.Periodo).where(
-            m.Periodo.nombre == per.nombre, m.Periodo.equipo_id.is_(None)))
-        if glob:
-            glob.cerrado_en = None
     q = select(m.PeriodoEquipo).where(m.PeriodoEquipo.periodo_id == per.id)
     if eq_filtro:
         q = q.where(m.PeriodoEquipo.equipo_id == eq_filtro)
