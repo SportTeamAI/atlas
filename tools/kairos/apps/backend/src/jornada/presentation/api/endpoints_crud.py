@@ -1366,6 +1366,15 @@ def reabrir_periodo(
             hq = hq.where(m.Periodo.equipo_id == eq_filtro)
         for hermano in db.scalars(hq):
             hermano.cerrado_en = None
+    else:
+        # Reabrir un ÁREA suelta: reabre TAMBIÉN el período GLOBAL de la misma quincena. El
+        # selector del front va por el período global; si queda cerrado, el área reabierta se ve
+        # "vacía" aunque sus horas estén intactas. Las demás áreas siguen cerradas (solo esta
+        # queda editable). #reabrir-area-visible
+        glob = db.scalar(select(m.Periodo).where(
+            m.Periodo.nombre == per.nombre, m.Periodo.equipo_id.is_(None)))
+        if glob:
+            glob.cerrado_en = None
     q = select(m.PeriodoEquipo).where(m.PeriodoEquipo.periodo_id == per.id)
     if eq_filtro:
         q = q.where(m.PeriodoEquipo.equipo_id == eq_filtro)
@@ -2138,8 +2147,11 @@ def asignar(
             for dia in dias:
                 for prev in db.scalars(select(m.RegistroHorario).where(
                         m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == dia)):
-                    if prev.hora_inicio == time(0, 0) and dia == per.fecha_inicio:
-                        continue   # la cola heredada del corte anterior se conserva (#cola-heredada)
+                    # La cola (00:00-…) es la CONTINUACIÓN del turno nocturno del día ANTERIOR:
+                    # marcar descanso NO la borra (si no, se pierden esas horas). Se conserva y el
+                    # día queda "D" + la cola. Aplica a cualquier día, no solo la heredada. #cola-preservada
+                    if prev.hora_inicio == time(0, 0):
+                        continue
                     db.delete(prev)
                 nov = db.scalar(select(m.Novedad).where(
                     m.Novedad.empleado_id == emp.id,
@@ -2163,8 +2175,10 @@ def asignar(
             for dia in dias:
                 for prev in db.scalars(select(m.RegistroHorario).where(
                         m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == dia)):
-                    if prev.hora_inicio == time(0, 0) and dia == per.fecha_inicio:
-                        continue   # la cola heredada del corte anterior NUNCA se toca (#cola-heredada)
+                    # La cola (00:00-…) del turno nocturno del día anterior se conserva también
+                    # al marcar Guardia (no se pierden esas horas). #cola-preservada
+                    if prev.hora_inicio == time(0, 0):
+                        continue
                     db.delete(prev)
                 nov = db.scalar(select(m.Novedad).where(
                     m.Novedad.empleado_id == emp.id,
