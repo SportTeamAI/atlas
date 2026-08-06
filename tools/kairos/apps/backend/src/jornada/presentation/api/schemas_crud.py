@@ -279,6 +279,7 @@ class TurnoPatch(BaseModel):
     hora_inicio: time | None = None
     hora_fin: time | None = None
     almuerzo_min: int | None = None
+    equipos_ids: list[str] | None = None   # #6 áreas que usan el turno (vacío = todas); faltaba, por eso no se editaba
     activo: bool | None = None
 
 

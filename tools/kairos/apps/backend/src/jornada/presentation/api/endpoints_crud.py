@@ -58,6 +58,36 @@ def _estado_periodo(p: m.Periodo, hoy: date = None) -> str:
         return "programado"          # aún no empieza
     return "abierto"                 # EN CURSO hasta que TH lo cierre (aunque ya pasó la fecha)
 
+
+# #8 Mensaje único del bloqueo post-corte (reporte a TH ya pasó) para operativos.
+_MSG_POST_CORTE = (
+    "Este período ya pasó a Talento Humano (venció la fecha de reporte): líderes y "
+    "registradores ya no pueden editarlo. Está en tu Historial (abierto), puedes verlo y "
+    "escribir en el consolidado para dejar trazabilidad; los cambios los hace ahora TH."
+)
+
+
+def _estado_visible(p: m.Periodo, rol: str, hoy: date = None) -> str:
+    """#8 Estado que VE cada rol. Para líder/registrador, una vez pasó la fecha de corte
+    (reporte a TH) el período deja de ser su "en curso": lo ven como 'en_validacion' —historial
+    ABIERTO, NO cerrado— y su período actual pasa a ser el nuevo. TH (super_admin) lo sigue
+    viendo 'abierto' hasta que lo cierre. El período NO se cierra solo: solo cambia lo que ve
+    y puede hacer el operativo."""
+    est = _estado_periodo(p, hoy)
+    if est == "abierto" and rol != "super_admin" and (hoy or _hoy()) > p.fecha_corte:
+        return "en_validacion"
+    return est
+
+
+def _operativo_bloqueado(per: m.Periodo, user: m.Usuario, hoy: date = None) -> bool:
+    """#8 True si un operativo (líder/registrador) ya NO puede EDITAR porque venció la fecha de
+    corte. TH edita hasta cerrar. (El caso 'cerrado' lo siguen manejando los gating existentes;
+    este solo agrega la ventana post-corte y pre-cierre.)"""
+    if user.rol == "super_admin":
+        return False
+    return not per.cerrado_en and (hoy or _hoy()) > per.fecha_corte
+
+
 # Equipos de turnos fijos cuyas horas extra se reportan DÍA A DÍA (no por acumulado
 # semanal). Fuente única en schemas_crud (la comparte el motor y la UI vía EquipoOut).
 _EQUIPOS_EXTRAS_DIARIAS = s.EQUIPOS_EXTRAS_DIARIAS
@@ -1159,7 +1189,9 @@ def listar_periodos(user: m.Usuario = Depends(current_user), db: Session = Depen
     # garantizando que ningún autoflush ni commit accidental los escriba en DB.
     db.expunge_all()
     for p in periodos:
-        p.estado = _estado_periodo(p, hoy)
+        # #8 Rol-aware: al operativo, pasado el corte, su período viejo le sale 'en_validacion'
+        # (historial abierto) y el nuevo pasa a ser su "en curso"; TH lo ve 'abierto' hasta cerrar.
+        p.estado = _estado_visible(p, user.rol, hoy)
     # Filtrado por ÁREA: un usuario de un área ve sus períodos propios + los globales que
     # NO estén tapados por uno propio (que cruce sus fechas). TH (sin área) ve todos.
     if user.equipo_id and user.rol != "super_admin":
@@ -2027,6 +2059,8 @@ def aplicar_habitual(
     per = db.get(m.Periodo, periodo_id)
     if not per:
         raise HTTPException(404, "Período no encontrado.")
+    if _operativo_bloqueado(per, user):
+        raise HTTPException(409, _MSG_POST_CORTE)
     if _estado_periodo(per) != "abierto":
         raise HTTPException(409, "El período no está abierto.")
     _guardar_cambio(db, periodo_id, user)
@@ -2138,6 +2172,8 @@ def asignar(
     per = db.get(m.Periodo, periodo_id)
     if not per:
         raise HTTPException(404, "Período no encontrado.")
+    if _operativo_bloqueado(per, user):
+        raise HTTPException(409, _MSG_POST_CORTE)
     if _estado_periodo(per) != "abierto":
         raise HTTPException(409, "El período no está abierto.")
     _guardar_cambio(db, periodo_id, user)
@@ -2365,6 +2401,8 @@ def aplicar_turno(
 ) -> dict:
     """Aplica un TURNO (horario fijo) a todo el período (atajo de registro)."""
     per = db.get(m.Periodo, periodo_id)
+    if per and _operativo_bloqueado(per, user):
+        raise HTTPException(409, _MSG_POST_CORTE)
     if not per or _estado_periodo(per) != "abierto":
         raise HTTPException(409, "El período no está abierto.")
     _guardar_cambio(db, periodo_id, user)
@@ -2561,6 +2599,8 @@ def crear_novedad(payload: s.NovedadIn, user: m.Usuario = Depends(require_rol("s
             raise HTTPException(404, "Período no encontrado.")
         if user.rol != "super_admin" and _estado_periodo(per) != "abierto":
             raise HTTPException(409, "Ese período ya no está abierto.")
+        if _operativo_bloqueado(per, user):
+            raise HTTPException(409, _MSG_POST_CORTE)
     nov = m.Novedad(**payload.model_dump())
     db.add(nov)
     db.commit()
@@ -2577,6 +2617,8 @@ def borrar_novedad(novedad_id: str, user: m.Usuario = Depends(require_rol("super
         per = db.get(m.Periodo, nov.periodo_id) if nov.periodo_id else None
         if per and _estado_periodo(per) == "cerrado" and user.rol != "super_admin":
             raise HTTPException(409, "El período ya está cerrado; no se puede modificar.")
+        if per and _operativo_bloqueado(per, user):
+            raise HTTPException(409, _MSG_POST_CORTE)
         if nov.periodo_id:
             _guardar_cambio(db, nov.periodo_id, user)
         db.delete(nov)
@@ -2638,6 +2680,8 @@ def crear_registro(payload: s.RegistroIn, user: m.Usuario = Depends(require_rol(
         # cambio. Los cambios de TH quedan en la trazabilidad del chat (via _guardar_cambio).
         if _estado_periodo(per) == "cerrado" and user.rol != "super_admin":
             raise HTTPException(409, "El período ya está cerrado; usa Solicitud de cambio.")
+        if _operativo_bloqueado(per, user):
+            raise HTTPException(409, _MSG_POST_CORTE)
         if not (per.fecha_inicio <= payload.fecha <= per.fecha_fin):
             raise HTTPException(400, "La fecha está fuera del rango del período.")
         _guardar_cambio(db, payload.periodo_id, user)
@@ -2720,6 +2764,8 @@ def borrar_registro(registro_id: str, user: m.Usuario = Depends(require_rol("sup
         per = db.get(m.Periodo, reg.periodo_id) if reg.periodo_id else None
         if per and _estado_periodo(per) == "cerrado" and user.rol != "super_admin":
             raise HTTPException(409, "El período ya está cerrado; no se puede modificar.")
+        if per and _operativo_bloqueado(per, user):
+            raise HTTPException(409, _MSG_POST_CORTE)
         # La madrugada (00:00) del PRIMER día de un período es la cola de un turno del período
         # ANTERIOR (pasó del corte por cálculo). Los operativos del nuevo período no la quitan;
         # solo TH puede (si de verdad hay que corregirla).
