@@ -2566,7 +2566,23 @@ def listar_registros(
         q = q.where(m.RegistroHorario.periodo_id == periodo_id)
     if empleado_id:
         q = q.where(m.RegistroHorario.empleado_id == empleado_id)
-    return list(db.scalars(q.order_by(m.RegistroHorario.fecha)))
+    res = list(db.scalars(q.order_by(m.RegistroHorario.fecha)))
+    # #cola-ultimo-dia: para que la grilla UNIFIQUE el turno del ÚLTIMO día (p. ej. 22-6) con su
+    # madrugada —que vive en la quincena SIGUIENTE—, se incluyen también las colas (00:00) del día
+    # posterior al fin del período. Son SOLO para el display (colaSig): ese día no está en `dias`,
+    # así que NO se suman al total del período.
+    if periodo_id:
+        per = db.get(m.Periodo, periodo_id)
+        if per:
+            qc = select(m.RegistroHorario).join(m.Empleado, m.Empleado.id == m.RegistroHorario.empleado_id).where(
+                m.RegistroHorario.fecha == per.fecha_fin + timedelta(days=1),
+                m.RegistroHorario.hora_inicio == time(0, 0))
+            if vis is not None:
+                qc = qc.where(m.Empleado.equipo_id.in_(vis or ["__none__"]))
+            if empleado_id:
+                qc = qc.where(m.RegistroHorario.empleado_id == empleado_id)
+            res += list(db.scalars(qc))
+    return res
 
 
 @router.post("/registros", response_model=s.RegistroOut, status_code=201)
