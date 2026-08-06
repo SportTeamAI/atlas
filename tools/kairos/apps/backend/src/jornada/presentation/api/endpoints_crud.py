@@ -892,6 +892,7 @@ def editar_equipo(equipo_id: str, payload: s.EquipoPatch, _: m.Usuario = Depends
     if not eq:
         raise HTTPException(404, "Equipo no encontrado.")
     datos = payload.model_dump(exclude_unset=True)
+    _alm_antes = eq.almuerzo_min   # #alimentacion: para saber si el almuerzo cambió y re-aplicar
     if "lider_id" in datos:
         _asignar_lider(db, eq.id, datos["lider_id"])
     # ACTIVAR un área activa también a SU GENTE. Las áreas que llegan de Buk se crean
@@ -904,6 +905,24 @@ def editar_equipo(equipo_id: str, payload: s.EquipoPatch, _: m.Usuario = Depends
     if activando:
         for emp in db.scalars(select(m.Empleado).where(m.Empleado.equipo_id == eq.id)):
             emp.activo = True
+    # #alimentacion Si cambió el almuerzo del área, re-aplica a SU gente en los períodos ABIERTOS
+    # (los cerrados ya se reportaron; si hay que corregirlos, TH los reabre). Así el cambio "se
+    # aplica de verdad" sin tener que recalcular a mano.
+    if "almuerzo_min" in datos and datos["almuerzo_min"] != _alm_antes:
+        db.flush()
+        _gente = list(db.scalars(select(m.Empleado).where(
+            m.Empleado.equipo_id == eq.id, m.Empleado.activo, m.Empleado.lleva_horario)))
+        # SOLO los períodos abiertos DE ESTA ÁREA. Ojo: _reclasificar lee los registros por RANGO
+        # DE FECHA (no por periodo_id); si iteráramos períodos de otras áreas —que pueden tener otras
+        # fechas— reescribiríamos registros del empleado en una ventana donde SU período está cerrado
+        # → corromper nómina ya reportada. Orden ASC + 2 pasadas por si hay una semana partida entre
+        # dos períodos abiertos (raro: TH reabrió el anterior), para que la extra no quede rancia.
+        _pers = list(db.scalars(select(m.Periodo).where(
+            m.Periodo.equipo_id == eq.id, m.Periodo.cerrado_en.is_(None)).order_by(m.Periodo.fecha_inicio)))
+        for _ in range(2):
+            for per in _pers:
+                for emp in _gente:
+                    _reclasificar_periodo_emp(db, emp, per)
     db.commit()
     db.refresh(eq)
     return eq
@@ -974,6 +993,7 @@ def editar_empleado(
     if not emp:
         raise HTTPException(404, "Empleado no encontrado.")
     datos = payload.model_dump(exclude_none=True)
+    _alm_antes = emp.almuerzo_min   # #alimentacion: para re-aplicar si cambia
     # #1 Cambiar de área A MANO lo marca como MANUAL: la sincronización de Buk NO revierte el
     # área de quien se movió aquí (solo mueve a quien no se tocó). Si no, el re-sync deshacía
     # el cambio y la persona volvía a su área de Buk. #equipo-manual
@@ -981,12 +1001,26 @@ def editar_empleado(
         emp.equipo_manual = True
     for k, v in datos.items():
         setattr(emp, k, v)
+    # #alimentacion El almuerzo PROPIO se maneja aparte: se puede setear a None explícitamente
+    # (= usar el del área). exclude_none lo dropea arriba, así que se aplica desde el payload crudo.
+    if "almuerzo_min" in payload.model_fields_set:
+        emp.almuerzo_min = payload.almuerzo_min
     if datos.get("lleva_horario"):
         emp.activo = True   # engranaje: quien lleva horario tiene que existir en la plataforma para salir en la grilla
     # OJO: antes, al pasar a líder se BORRABAN sus horarios y novedades (el modelo viejo
     # asumía "líder = no lleva horario"). Ya no: quién aparece en grilla/reporte lo decide
     # `lleva_horario`, y hay líderes que sí trabajan turnos. Borrar datos aquí era una
     # pérdida silenciosa.
+    # #alimentacion Si cambió el almuerzo del empleado, re-aplica en los períodos ABIERTOS.
+    if "almuerzo_min" in payload.model_fields_set and payload.almuerzo_min != _alm_antes:
+        db.flush()
+        # Solo los períodos abiertos DE SU ÁREA (mismo motivo que en editar_equipo: _reclasificar
+        # lee por rango de fecha, no por periodo_id) + orden ASC y 2 pasadas por la semana partida.
+        _pers = list(db.scalars(select(m.Periodo).where(
+            m.Periodo.equipo_id == emp.equipo_id, m.Periodo.cerrado_en.is_(None)).order_by(m.Periodo.fecha_inicio)))
+        for _ in range(2):
+            for per in _pers:
+                _reclasificar_periodo_emp(db, emp, per)
     db.commit()
     db.refresh(emp)
     return emp
