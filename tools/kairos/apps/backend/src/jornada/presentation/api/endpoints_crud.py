@@ -216,6 +216,19 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
         if r.hora_inicio == _MID and (r.fecha - timedelta(days=1)) in dias_fin_mid:
             k = r.fecha - timedelta(days=1)
             cola_gross_de[k] = cola_gross_de.get(k, 0.0) + _gross_h(r.hora_inicio, r.hora_fin)
+    # #multibloque El almuerzo del día se descuenta del bloque MÁS LARGO (base), no del primero
+    # cronológico: si un bloque corto (≤7h→0) iba ANTES que uno largo el mismo día, el largo
+    # quedaba SIN almuerzo y el día pagaba de más (inflando la semana → extra falsa). Se toma el
+    # de mayor gross (base+cola), excluyendo colas (00:00) y extras marcadas (nunca descuentan).
+    _base_meal: dict[date, str] = {}
+    _base_dur: dict[date, float] = {}
+    for r in regs:
+        if r.hora_inicio == _MID or r.motivo:
+            continue
+        g = _gross_h(r.hora_inicio, r.hora_fin) + (cola_gross_de.get(r.fecha, 0.0) if r.hora_fin == _MID else 0.0)
+        if g > _base_dur.get(r.fecha, -1.0):
+            _base_dur[r.fecha] = g
+            _base_meal[r.fecha] = r.id
     descanso = _DIAS.get((emp.dia_descanso or "").lower(), 6)
     jt_base = JornadaType(emp.tipo_jornada)
     # Turno continuo / dirección-confianza no generan extras ni recargos: se respetan.
@@ -234,7 +247,7 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
     lim_dia = emp.jornada_horas_dia or 8.0
     acc: dict[tuple[int, int], float] = {}
     acc_dia: dict[date, float] = {}   # trabajo (neto) acumulado por DÍA (extras diarias)
-    meal_dias: set[date] = set()      # días a los que ya se les descontó el almuerzo (1 vez/día)
+    # El almuerzo 1×/día lo decide `_base_meal` (bloque más largo del día, calculado arriba).
     # Semana partida al inicio del período (empieza a mitad de semana): NO se asume
     # nada por los días previos. Solo cuentan las horas REALMENTE trabajadas —las de
     # este período y las de la quincena anterior que compartan semana (ver abajo)—.
@@ -279,7 +292,7 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
         # El almuerzo se descuenta UNA sola vez por día, del turno BASE (no de la cola ni
         # de una extra marcada; si no, la extra "reclamaba" el almuerzo y el turno base
         # quedaba sin descontarlo → salía 1 h extra fantasma).
-        if reg.fecha in meal_dias or es_cola or es_extra_marcado:
+        if reg.id != _base_meal.get(reg.fecha) or es_cola or es_extra_marcado:
             meal_h = 0.0
         else:
             _g_base = _gross_h(reg.hora_inicio, reg.hora_fin)
@@ -301,7 +314,6 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
             # 23:00-08:00 → base 1 h) hacía que classify_shift recibiera almuerzo ≥ turno y
             # reventara con HTTP 500 al reclasificar (no se podía guardar ni cerrar el período).
             meal_h = min(_alm, max(0.0, _g - 0.5), max(0.0, _g_base - 1e-6))
-            meal_dias.add(reg.fecha)
         jornada_dia = jt_base if sin_extras else (JornadaType.ESTANDAR if dia_diario else JornadaType.FLEXIBLE)
         dia_antes = acc_dia.get(reg.fecha, 0.0)
         r = classify_shift(
