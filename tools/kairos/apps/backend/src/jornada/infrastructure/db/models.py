@@ -345,12 +345,9 @@ class Notificacion(Base):
     creado_en: Mapped[datetime] = mapped_column(DateTime, default=ahora_bogota)
 
 
-class TiempoAlimentacionContrato(Base):
-    """Minutos de almuerzo por tipo de contrato (configurable por RH)."""
-
-    __tablename__ = "tiempo_almuerzo_contrato"
-    tipo_contrato: Mapped[str] = mapped_column(String(20), primary_key=True)
-    minutos: Mapped[int] = mapped_column(default=60)
+# (removido) `TiempoAlimentacionContrato` era código muerto: el motor calcula el almuerzo por
+# DURACIÓN del turno + área/persona, nunca leía esta tabla. La tabla queda huérfana en la BD
+# (inofensiva; sin migración).
 
 
 class BeneficioLicencia(Base):

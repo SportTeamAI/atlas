@@ -375,16 +375,6 @@ class PeriodoIn(BaseModel):
     equipo_id: str | None = None
 
 
-class TiempoAlmuerzoOut(_ORM):
-    tipo_contrato: str
-    minutos: int
-
-
-class TiempoAlmuerzoIn(BaseModel):
-    tipo_contrato: str
-    minutos: int
-
-
 class PeriodoPatch(BaseModel):
     """Ajuste manual de fechas de un período (excepciones, #3)."""
 

@@ -88,9 +88,6 @@ def _operativo_bloqueado(per: m.Periodo, user: m.Usuario, hoy: date = None) -> b
     return not per.cerrado_en and (hoy or _hoy()) > per.fecha_corte
 
 
-# Equipos de turnos fijos cuyas horas extra se reportan DÍA A DÍA (no por acumulado
-# semanal). Fuente única en schemas_crud (la comparte el motor y la UI vía EquipoOut).
-_EQUIPOS_EXTRAS_DIARIAS = s.EQUIPOS_EXTRAS_DIARIAS
 
 
 def _semanas_de_periodo(per: "m.Periodo") -> tuple[dict[tuple[int, int], int], list[dict]]:
@@ -127,15 +124,8 @@ def _semanas_de_periodo(per: "m.Periodo") -> tuple[dict[tuple[int, int], int], l
     return seen, meta
 
 
-def restar_dias_habiles(desde: date, n: int) -> date:
-    """Devuelve la fecha n días hábiles ANTES de `desde` (L-V, sin festivos)."""
-    d = desde
-    restados = 0
-    while restados < n:
-        d -= timedelta(days=1)
-        if d.weekday() < 5 and not es_festivo(d):  # 0-4 = L-V
-            restados += 1
-    return d
+# (removido) `restar_dias_habiles` estaba DUPLICADA aquí; la única versión usada vive en
+# jornada.domain.nomina.calendario (esta copia no se llamaba en ningún lado).
 
 
 def _clasificar(emp: m.Empleado, fecha: date, ini: time, fin: time, meal_h: float, rest: bool):
@@ -292,7 +282,8 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
         if reg.fecha in meal_dias or es_cola or es_extra_marcado:
             meal_h = 0.0
         else:
-            _g = _gross_h(reg.hora_inicio, reg.hora_fin)
+            _g_base = _gross_h(reg.hora_inicio, reg.hora_fin)
+            _g = _g_base
             # Turno partido (termina a medianoche): el almuerzo se calcula sobre el turno
             # COMPLETO (base + cola) y se descuenta de la parte base (entre los 2 días).
             if reg.hora_fin == _MID:
@@ -306,7 +297,10 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
                 _alm = 0.0
             else:
                 _alm = alm_area_h
-            meal_h = min(_alm, max(0.0, _g - 0.5))
+            # #robustez Capar al gross de la BASE: un turno partido con base ≤ almuerzo (p. ej.
+            # 23:00-08:00 → base 1 h) hacía que classify_shift recibiera almuerzo ≥ turno y
+            # reventara con HTTP 500 al reclasificar (no se podía guardar ni cerrar el período).
+            meal_h = min(_alm, max(0.0, _g - 0.5), max(0.0, _g_base - 1e-6))
             meal_dias.add(reg.fecha)
         jornada_dia = jt_base if sin_extras else (JornadaType.ESTANDAR if dia_diario else JornadaType.FLEXIBLE)
         dia_antes = acc_dia.get(reg.fecha, 0.0)
@@ -513,14 +507,7 @@ TIPOS_SOLICITUD = {
 }
 
 
-def _receptores_th(db: Session) -> list[m.Usuario]:
-    """A quién de TH le llegan las solicitudes: el LÍDER del área de Talento Humano
-    (siempre, sale de `Equipo.lider_id`) más los que TH haya marcado."""
-    receptores: dict[str, m.Usuario] = {}
-    for u in db.scalars(select(m.Usuario).where(m.Usuario.rol == "super_admin", m.Usuario.activo)):
-        if u.recibe_solicitudes or _es_lider_de_th(db, u):
-            receptores[u.id] = u
-    return list(receptores.values())
+# (removido) `_receptores_th` no se llamaba (listar_receptores arma su propia lista).
 
 
 def _es_lider_de_th(db: Session, usuario: m.Usuario) -> bool:
@@ -1938,23 +1925,8 @@ def borrar_pago_manual(pago_id: str, _: m.Usuario = Depends(require_rol("super_a
         db.commit()
 
 
-# ── Tiempo de almuerzo por tipo de contrato ──────────────────────────────────
-@router.get("/almuerzo", response_model=list[s.TiempoAlmuerzoOut])
-def listar_almuerzo(_: m.Usuario = Depends(current_user), db: Session = Depends(get_session)):
-    return list(db.scalars(select(m.TiempoAlimentacionContrato)))
-
-
-@router.put("/almuerzo", response_model=s.TiempoAlmuerzoOut)
-def upsert_almuerzo(payload: s.TiempoAlmuerzoIn, _: m.Usuario = Depends(require_rol("super_admin")), db: Session = Depends(get_session)):
-    obj = db.get(m.TiempoAlimentacionContrato, payload.tipo_contrato)
-    if obj:
-        obj.minutos = payload.minutos
-    else:
-        obj = m.TiempoAlimentacionContrato(tipo_contrato=payload.tipo_contrato, minutos=payload.minutos)
-        db.add(obj)
-    db.commit()
-    db.refresh(obj)
-    return obj
+# (removido) La config de "tiempo de almuerzo por tipo de contrato" era código muerto:
+# el motor calcula el almuerzo por DURACIÓN del turno + área/persona, nunca leía esta tabla.
 
 
 # ── Solicitudes de cambio post-cierre (#15) ──────────────────────────────────
@@ -2568,7 +2540,7 @@ def reporte_periodo(periodo_id: str, user: m.Usuario = Depends(current_user), db
     } for e in empleados]
 
     return {
-        "periodo": {"id": per.id, "nombre": per.nombre, "estado": per.estado,
+        "periodo": {"id": per.id, "nombre": per.nombre, "estado": _estado_visible(per, user.rol),  # #4 rol-aware (coherente con listar_periodos)
                     "fecha_inicio": per.fecha_inicio.isoformat(), "fecha_fin": per.fecha_fin.isoformat()},
         "categorias": _CATEGORIAS,
         "semanas_periodo": sem_meta,  # #3
@@ -2592,11 +2564,14 @@ def listar_novedades(empleado_id: str | None = None, user: m.Usuario = Depends(c
 def crear_novedad(payload: s.NovedadIn, user: m.Usuario = Depends(require_rol("super_admin", "registrador", "lider")), db: Session = Depends(get_session)):
     """Pone una novedad (licencia, descanso…) en un día. Solo sobre gente del propio
     equipo y sobre un período que siga abierto: una novedad suma/quita horas del reporte."""
-    _exigir_empleado_visible(db, user, payload.empleado_id)
-    if payload.periodo_id:
-        per = db.get(m.Periodo, payload.periodo_id)
-        if not per:
-            raise HTTPException(404, "Período no encontrado.")
+    emp = _exigir_empleado_visible(db, user, payload.empleado_id)
+    # #8 El candado NO puede depender de que el cliente mande periodo_id: si lo omitía, la novedad
+    # quedaba con periodo_id=None y entraba IGUAL al reporte por solape de fechas, evadiendo el
+    # bloqueo post-corte. Si falta, se deriva por la fecha y se aplican SIEMPRE los guards.
+    per = db.get(m.Periodo, payload.periodo_id) if payload.periodo_id else _periodo_de_fecha(db, payload.fecha_inicio, emp.equipo_id if emp else None)
+    if payload.periodo_id and not per:
+        raise HTTPException(404, "Período no encontrado.")
+    if per:
         if user.rol != "super_admin" and _estado_periodo(per) != "abierto":
             raise HTTPException(409, "Ese período ya no está abierto.")
         if _operativo_bloqueado(per, user):
@@ -2614,7 +2589,9 @@ def borrar_novedad(novedad_id: str, user: m.Usuario = Depends(require_rol("super
     nov = db.get(m.Novedad, novedad_id)
     if nov:
         emp = _exigir_empleado_visible(db, user, nov.empleado_id)
-        per = db.get(m.Periodo, nov.periodo_id) if nov.periodo_id else None
+        # #8 Si la novedad no tiene período (se pudo crear sin él), derivarlo por fecha para que el
+        # candado post-corte/cerrado no se salte.
+        per = db.get(m.Periodo, nov.periodo_id) if nov.periodo_id else _periodo_de_fecha(db, nov.fecha_inicio, emp.equipo_id if emp else None)
         if per and _estado_periodo(per) == "cerrado" and user.rol != "super_admin":
             raise HTTPException(409, "El período ya está cerrado; no se puede modificar.")
         if per and _operativo_bloqueado(per, user):
@@ -2672,10 +2649,13 @@ def crear_registro(payload: s.RegistroIn, user: m.Usuario = Depends(require_rol(
     emp = _exigir_empleado_visible(db, user, payload.empleado_id)
     if not emp.activo:
         raise HTTPException(404, "Empleado no encontrado o inactivo.")
-    if payload.periodo_id:
-        per = db.get(m.Periodo, payload.periodo_id)
-        if not per:
-            raise HTTPException(404, "Período no encontrado.")
+    # #8 Derivar el período por fecha si no viene (el guard cerrado/post-corte no puede depender de
+    # un campo opcional del cliente: un registro con periodo_id=None se colaba y, como el motor lee
+    # por RANGO DE FECHA, perturbaba las extras de los registros legítimos).
+    per = db.get(m.Periodo, payload.periodo_id) if payload.periodo_id else _periodo_de_fecha(db, payload.fecha, emp.equipo_id)
+    if payload.periodo_id and not per:
+        raise HTTPException(404, "Período no encontrado.")
+    if per:
         # Período cerrado: solo TH (super_admin) puede corregir; operativos usan Solicitud de
         # cambio. Los cambios de TH quedan en la trazabilidad del chat (via _guardar_cambio).
         if _estado_periodo(per) == "cerrado" and user.rol != "super_admin":
@@ -2684,7 +2664,7 @@ def crear_registro(payload: s.RegistroIn, user: m.Usuario = Depends(require_rol(
             raise HTTPException(409, _MSG_POST_CORTE)
         if not (per.fecha_inicio <= payload.fecha <= per.fecha_fin):
             raise HTTPException(400, "La fecha está fuera del rango del período.")
-        _guardar_cambio(db, payload.periodo_id, user)
+        _guardar_cambio(db, per.id, user)
     if db.scalar(select(m.Novedad).where(
         m.Novedad.empleado_id == emp.id, m.Novedad.fecha_inicio <= payload.fecha, m.Novedad.fecha_fin >= payload.fecha)):
         raise HTTPException(409, "El empleado tiene una novedad ese día; no se puede registrar horario.")
