@@ -2164,6 +2164,11 @@ def asignar(
     turno = db.get(m.Turno, payload.turno_id) if payload.turno_id else None
     if payload.turno_id and not turno:
         raise HTTPException(404, "Turno no encontrado.")
+    # #bloques Si el turno seleccionado es PARTIDO (varios tramos), se aplican TODOS —no solo el
+    # 1º—: se arma payload.bloques desde turno.bloques y el flujo de bloques (abajo) los aplica.
+    if turno and turno.bloques and not payload.bloques:
+        payload.bloques = [s.BloqueManual(hora_inicio=time.fromisoformat(b["hora_inicio"]),
+                                          hora_fin=time.fromisoformat(b["hora_fin"])) for b in turno.bloques]
 
     # Período es global: el alcance se limita al equipo del usuario operativo (RH = todos).
     _eq_filtro = equipos_visibles(user)
