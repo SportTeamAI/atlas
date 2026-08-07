@@ -144,6 +144,10 @@ class Turno(Base):
     # #2 Un mismo horario NO se duplica: un turno lo pueden usar VARIAS áreas.
     # Lista de ids de equipo que lo usan (vacía = todas).
     equipos_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # #bloques Turno PARTIDO: lista de tramos [{"hora_inicio":"08:00","hora_fin":"12:00"}, ...].
+    # Vacía = turno de un solo bloque (usa hora_inicio/hora_fin). Al aplicarlo se crea un registro
+    # por tramo; el almuerzo lo lleva el bloque más largo del día (regla por duración).
+    bloques: Mapped[list] = mapped_column(JSON, default=list)
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
 
 

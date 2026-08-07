@@ -259,6 +259,7 @@ class TurnoOut(_ORM):
     almuerzo_min: int
     equipo_id: str | None
     equipos_ids: list[str] = []  # #2 áreas que USAN este turno (vacío = todas)
+    bloques: list[dict] = []     # #bloques tramos {hora_inicio,hora_fin} "HH:MM" (vacío = un bloque)
 
 
 class TurnoIn(BaseModel):
@@ -271,6 +272,7 @@ class TurnoIn(BaseModel):
     almuerzo_min: int = 60
     equipo_id: str | None = None
     equipos_ids: list[str] = []
+    bloques: list[dict] = []     # #bloques [{hora_inicio,hora_fin}] "HH:MM"; vacío = un solo bloque
 
 
 class TurnoPatch(BaseModel):
@@ -280,6 +282,7 @@ class TurnoPatch(BaseModel):
     hora_fin: time | None = None
     almuerzo_min: int | None = None
     equipos_ids: list[str] | None = None   # #6 áreas que usan el turno (vacío = todas); faltaba, por eso no se editaba
+    bloques: list[dict] | None = None      # #bloques
     activo: bool | None = None
 
 

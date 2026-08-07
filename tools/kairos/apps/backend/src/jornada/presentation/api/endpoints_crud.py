@@ -2411,20 +2411,25 @@ def aplicar_turno(
             if db.scalar(select(m.Novedad).where(
                 m.Novedad.empleado_id == emp.id, m.Novedad.fecha_inicio <= dia, m.Novedad.fecha_fin >= dia)):
                 continue
-            existente = db.scalar(select(m.RegistroHorario).where(
-                m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == dia))
-            if existente and not payload.sobrescribir:
+            existentes = list(db.scalars(select(m.RegistroHorario).where(
+                m.RegistroHorario.empleado_id == emp.id, m.RegistroHorario.fecha == dia)))
+            propios = [x for x in existentes if x.hora_inicio != time(0, 0)]  # nunca la cola heredada 00:00
+            if propios and not payload.sobrescribir:
                 continue
-            if existente:
-                db.delete(existente)
-            r, segs = _clasificar(emp, dia, turno.hora_inicio, turno.hora_fin, 0.0, False)
-            db.add(m.RegistroHorario(
-                empleado_id=emp.id, periodo_id=per.id, fecha=dia,
-                hora_inicio=turno.hora_inicio, hora_fin=turno.hora_fin,
-                tiempo_alimentacion_h=(turno.almuerzo_min or 0) / 60.0,
-                duracion_bruta_h=r.gross_hours, duracion_neta_h=r.net_hours,
-                tipo_descanso=r.rest_type.value if r.rest_type else None, clasificacion=segs, estado="pendiente"))
-            creados += 1
+            for x in propios:
+                db.delete(x)
+            # #bloques Turno PARTIDO: un registro por tramo (el motor recompone; el almuerzo lo lleva
+            # el bloque más largo del día). Turno normal: un solo bloque (hora_inicio/hora_fin).
+            _tramos = [(time.fromisoformat(b["hora_inicio"]), time.fromisoformat(b["hora_fin"]))
+                       for b in (turno.bloques or [])] or [(turno.hora_inicio, turno.hora_fin)]
+            for (_hi, _hf) in _tramos:
+                r, segs = _clasificar(emp, dia, _hi, _hf, 0.0, False)
+                db.add(m.RegistroHorario(
+                    empleado_id=emp.id, periodo_id=per.id, fecha=dia,
+                    hora_inicio=_hi, hora_fin=_hf, tiempo_alimentacion_h=0.0,
+                    duracion_bruta_h=r.gross_hours, duracion_neta_h=r.net_hours,
+                    tipo_descanso=r.rest_type.value if r.rest_type else None, clasificacion=segs, estado="pendiente"))
+                creados += 1
     db.flush()
     for emp in empleados:
         _reclasificar_periodo_emp(db, emp, per)
