@@ -336,14 +336,6 @@ class ConfigRecargoOut(_ORM):
     jornada_max_semanal_h: float
 
 
-class ConfigRecargoPatch(BaseModel):
-    recargo_nocturna_h: float | None = None
-    recargo_extra_diurna: float | None = None
-    recargo_extra_nocturna: float | None = None
-    recargo_dia_descanso: float | None = None
-    jornada_max_semanal_h: float | None = None
-
-
 class PeriodoOut(_ORM):
     id: str
     nombre: str | None

@@ -2791,25 +2791,14 @@ def borrar_registro(registro_id: str, user: m.Usuario = Depends(require_rol("sup
         db.commit()
 
 
-# ── Configuración: recargos (RH puede MODIFICAR) ────────────────────────────
+# ── Configuración: recargos (SOLO LECTURA) ──────────────────────────────────
+# Los recargos y la jornada máxima son de LEY (Ley 2466/2025), NO config de empresa: no se
+# tocan a mano. La UI los muestra en "Referencia legal". Cambiarlos = DESARROLLO (ajustar el
+# calendario de vigencias en código + desplegar), no un botón. Por eso ya NO hay endpoint de
+# edición: se quitó `editar_recargo` (PATCH) para que nadie rompa la nómina por error.
 @router.get("/config/recargos", response_model=list[s.ConfigRecargoOut])
 def config_recargos(_: m.Usuario = Depends(require_rol("super_admin")), db: Session = Depends(get_session)):
     return list(db.scalars(select(m.ConfigRecargo).order_by(m.ConfigRecargo.fecha_desde)))
-
-
-@router.patch("/config/recargos/{fecha_desde}", response_model=s.ConfigRecargoOut)
-def editar_recargo(
-    fecha_desde: date, payload: s.ConfigRecargoPatch,
-    _: m.Usuario = Depends(require_rol("super_admin")), db: Session = Depends(get_session),
-):
-    cfg = db.scalar(select(m.ConfigRecargo).where(m.ConfigRecargo.fecha_desde == fecha_desde))
-    if not cfg:
-        raise HTTPException(404, "Vigencia no encontrada.")
-    for k, v in payload.model_dump(exclude_none=True).items():
-        setattr(cfg, k, v)
-    db.commit()
-    db.refresh(cfg)
-    return cfg
 
 
 @router.post("/normativa/investigar")
