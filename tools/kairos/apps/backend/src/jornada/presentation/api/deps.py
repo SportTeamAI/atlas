@@ -12,6 +12,7 @@ from collections.abc import Callable
 from fastapi import Cookie, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from jornada.config.settings import get_settings
 from jornada.infrastructure.db import models as m
@@ -77,7 +78,12 @@ def current_user(
         .where(m.Permiso.usuario_id == user.id, m.Herramienta.slug == "kairos", m.Herramienta.activa),
     )
     if kairos_rol is not None:
-        user.rol = kairos_rol
+        # #roles NO usar `user.rol = kairos_rol`: eso marca el atributo "dirty" y el 1er commit del
+        # request lo PERSISTE, pisando en la BD el `Usuario.rol` que OTRAS herramientas leen (bug
+        # cross-tool: un admin general que en Kairos es registrador quedaba degradado en todo el hub).
+        # El rol de Kairos vive en `Permiso`; aquí solo se fija EN MEMORIA para la petición con
+        # set_committed_value (no lo marca modificado → nunca se escribe en la base).
+        set_committed_value(user, "rol", kairos_rol)
     return user
 
 
