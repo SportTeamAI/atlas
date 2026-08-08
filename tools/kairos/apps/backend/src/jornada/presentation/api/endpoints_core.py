@@ -148,6 +148,10 @@ def asignar_permiso(
             raise HTTPException(400, f"{h.nombre} no tiene roles definidos.")
         p = m.Permiso(usuario_id=u.id, herramienta_id=h.id, rol=rol_nuevo, otorgado_por=admin.id)
         db.add(p)
+    # #roles-sync Para KAIROS el rol también vive en Usuario.rol (lo leen las pantallas de Kairos y
+    # el atajo de acceso). Se mantienen SINCRONIZADOS: lo que se pone aquí se refleja dentro de Kairos.
+    if h.slug == "kairos" and p.rol:
+        u.rol = p.rol
     db.commit()
     db.refresh(p)
 

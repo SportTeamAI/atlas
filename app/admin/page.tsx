@@ -25,6 +25,12 @@ interface Herramienta {
   roles?: string[];   // roles válidos de la herramienta (para elegir el rol al dar acceso)
 }
 
+// Etiquetas amigables (parejas con las de Kairos). El VALOR real sigue siendo super_admin/lider/…
+const ROL_LABEL: Record<string, string> = {
+  super_admin: "Administrador", lider: "Líder", registrador: "Registrador",
+  consulta: "Consulta", miembro: "Miembro",
+};
+
 export default function AdminPage() {
   const router = useRouter();
   const [personas, setPersonas] = useState<Persona[]>([]);
@@ -205,7 +211,7 @@ export default function AdminPage() {
                                 aria-label={`Rol en ${h.nombre}`}
                               >
                                 {(h.roles.includes(permiso.rol) ? h.roles : [permiso.rol, ...h.roles]).map((r) => (
-                                  <option key={r} value={r}>{r}</option>
+                                  <option key={r} value={r}>{ROL_LABEL[r] || r}</option>
                                 ))}
                               </select>
                             ) : (

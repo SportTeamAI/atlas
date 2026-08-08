@@ -420,6 +420,16 @@ def _crear_o_activar_usuario(
     if not u.password_hash and not u.onboarding_token:
         u.onboarding_token = nuevo_token_onboarding()
         u.onboarding_expira = m.ahora_bogota() + timedelta(days=7)
+    # #roles-sync El rol de Kairos vive TAMBIÉN en el Permiso (lo lee el admin de Atlas). Al dar
+    # acceso desde Kairos se crea/actualiza el Permiso de kairos con el MISMO rol → aparece en Atlas.
+    db.flush()   # asegura u.id para el permiso
+    _kh = db.scalar(select(m.Herramienta).where(m.Herramienta.slug == "kairos"))
+    if _kh:
+        _p = db.scalar(select(m.Permiso).where(m.Permiso.usuario_id == u.id, m.Permiso.herramienta_id == _kh.id))
+        if _p:
+            _p.rol = rol
+        else:
+            db.add(m.Permiso(usuario_id=u.id, herramienta_id=_kh.id, rol=rol))
     return u
 
 
