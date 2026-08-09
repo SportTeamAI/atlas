@@ -37,11 +37,6 @@ class DefinirPasswordIn(BaseModel):
     password: str
 
 
-class TokenOut(BaseModel):
-    token: str
-    usuario: MeOut
-
-
 class OnboardingInfoOut(BaseModel):
     valido: bool
     email: str | None = None

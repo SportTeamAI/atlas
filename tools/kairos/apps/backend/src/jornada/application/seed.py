@@ -12,27 +12,10 @@ from datetime import date, time
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from jornada.domain.algorithms.classifier import classify_shift
 from jornada.domain.algorithms.recargos import DEFAULT_VIGENCIAS
-from jornada.domain.enums import JornadaType
-from jornada.domain.festivos import FESTIVOS_2026, es_festivo
-from jornada.domain.labels import category_label
+from jornada.domain.festivos import FESTIVOS_2026
 from jornada.infrastructure.db import models as m
 from jornada.infrastructure.db.database import Base, SessionLocal, engine
-
-
-def _clasificar(*, work_date, start, end, jornada, daily_limit, meal_h, rest_day):
-    r = classify_shift(
-        work_date=work_date, start=start, end=end, jornada=JornadaType(jornada),
-        daily_limit=daily_limit, meal_hours=meal_h, is_holiday=es_festivo(work_date),
-        is_employee_rest_day=rest_day,
-    )
-    segs = [
-        {"category": s.category.value, "label": category_label(s.category, r.rest_type),
-         "hours": s.hours, "recargo_pct": round(s.recargo * 100, 1)}
-        for s in r.segments
-    ]
-    return r, segs
 
 
 def inicializar_herramientas() -> None:

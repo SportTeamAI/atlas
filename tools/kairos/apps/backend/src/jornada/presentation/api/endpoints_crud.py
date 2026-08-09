@@ -6,7 +6,7 @@ registrador/líder solo ven y operan su equipo.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, time, timedelta
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -168,16 +168,6 @@ def _periodo_de_fecha(db: Session, fecha: date, equipo_id: str | None):
             return p
     return db.scalar(select(m.Periodo).where(
         m.Periodo.fecha_inicio <= fecha, m.Periodo.fecha_fin >= fecha, m.Periodo.equipo_id.is_(None)))
-
-
-def _meal_efectivo(meal: float, ini: time, fin: time) -> float:
-    """Alimentación a descontar según la duración del turno (#3): el almuerzo SOLO
-    se descuenta si el turno es lo bastante largo para que, tras descontarlo, queden
-    al menos 8 h (p. ej. 9 h con 1 h de almuerzo = 8 h). Si el turno es de 8 h o
-    menos, se registra completo (no se descuenta almuerzo)."""
-    if meal <= 0:
-        return 0.0
-    return meal if _gross_h(ini, fin) >= 8.0 + meal else 0.0
 
 
 def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> None:
@@ -350,11 +340,6 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
 
 
 # ── Identidad / usuarios ─────────────────────────────────────────────────────
-@router.get("/me", response_model=s.MeOut)
-def me(user: m.Usuario = Depends(current_user)) -> m.Usuario:
-    return user
-
-
 @router.get("/usuarios", response_model=list[s.MeOut])
 def listar_usuarios(_: m.Usuario = Depends(require_rol("super_admin")), db: Session = Depends(get_session)):
     return list(db.scalars(select(m.Usuario).order_by(m.Usuario.nombre)))

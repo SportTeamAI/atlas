@@ -20,7 +20,6 @@ from jornada.domain.algorithms.recargos import (
 from jornada.domain.algorithms.time_segments import (
     gross_duration_hours,
     split_into_franjas,
-    subtract_meal,
     subtract_meal_diurnas_first,
 )
 from jornada.domain.enums import Category, JornadaType, RestType
