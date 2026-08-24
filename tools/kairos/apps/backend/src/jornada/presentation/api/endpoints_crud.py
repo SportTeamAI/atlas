@@ -170,6 +170,43 @@ def _periodo_de_fecha(db: Session, fecha: date, equipo_id: str | None):
         m.Periodo.fecha_inicio <= fecha, m.Periodo.fecha_fin >= fecha, m.Periodo.equipo_id.is_(None)))
 
 
+def _limpiar_colas_huerfanas(db: Session, emp: m.Empleado, per: m.Periodo) -> int:
+    """Borra 'colas' HUÉRFANAS del período: registros que arrancan a las 00:00 (la
+    madrugada = continuación de un turno nocturno del día anterior) pero cuyo turno
+    PADRE —el que termina a las 00:00 el día ANTERIOR— ya no existe. Nacen al quitar o
+    cambiar el turno de la tarde/noche y dejan la madrugada suelta: esa madrugada INFLA
+    el acumulado de la semana y crea EXTRAS FANTASMA (el mismo turno se ve "duplicado"
+    entre dos días). Se corre en CADA recálculo → se auto-sana pase lo que pase (cualquier
+    path que deje una cola suelta la limpia el siguiente recálculo). #cola-huerfana
+
+    Dos protecciones para no tocar nada legítimo:
+      (1) NUNCA el 1er día del período (`fecha > per.fecha_inicio`): esa es la cola
+          HEREDADA del corte anterior, intocable (su padre vive en el período previo).
+      (2) Solo borra si de verdad NO hay padre (turno que termina 00:00 el día anterior,
+          en cualquier período). Una cola legítima siempre tiene su padre → jamás se borra.
+    """
+    _MID = time(0, 0)
+    cand = list(db.scalars(select(m.RegistroHorario).where(
+        m.RegistroHorario.empleado_id == emp.id,
+        m.RegistroHorario.hora_inicio == _MID,
+        m.RegistroHorario.fecha > per.fecha_inicio,   # excluye el 1er día (cola heredada)
+        m.RegistroHorario.fecha <= per.fecha_fin,
+    )))
+    borradas = 0
+    for r in cand:
+        tiene_padre = db.scalar(select(m.RegistroHorario.id).where(
+            m.RegistroHorario.empleado_id == emp.id,
+            m.RegistroHorario.fecha == r.fecha - timedelta(days=1),
+            m.RegistroHorario.hora_fin == _MID,
+        ))
+        if not tiene_padre:
+            db.delete(r)
+            borradas += 1
+    if borradas:
+        db.flush()
+    return borradas
+
+
 def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> None:
     """Recalcula los registros del empleado en el período con la lógica SEMANAL de
     extras (#5): las horas extra SOLO aparecen cuando el acumulado de la SEMANA
@@ -183,6 +220,9 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
     que toca el período —aunque caigan en otro período—, pero solo RE-clasifica los
     de ESTE período; los de otros períodos solo suman su neto ya guardado (#1).
     """
+    # Auto-sana colas HUÉRFANAS (madrugadas 00:00 sin turno padre) ANTES de acumular:
+    # si no, inflarían la semana y crearían extras fantasma. #cola-huerfana
+    _limpiar_colas_huerfanas(db, emp, per)
     # Rango que cubre las semanas completas del período: lunes de la 1ª semana →
     # domingo de la última.
     ini_semana = per.fecha_inicio - timedelta(days=per.fecha_inicio.weekday())
@@ -197,6 +237,16 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
     # Días cuyo turno TERMINA a medianoche: al día siguiente les cae una "cola"
     # (00:00-…) que es la CONTINUACIÓN de ese turno, no un bloque nuevo del día.
     _MID = time(0, 0)
+    # #extras-marcadas Orden para el TOPE SEMANAL: dentro de cada semana ISO, PRIMERO el trabajo
+    # BASE (llena las 42 h) y AL FINAL las extras MARCADAS (con motivo). Así una extra marcada es el
+    # EXCEDENTE de la semana: cuenta como NORMAL si el base no llegó a 42 (la completa), y es EXTRA
+    # —en SU DÍA y con SU recargo (nocturno/dominical/festivo)— solo cuando ya se cumplieron las 42.
+    # No empuja el trabajo base a extra ni mueve la extra a otro día (ej. al domingo), ni duplica.
+    # (El orden por fecha/hora se conserva dentro de cada grupo; sin marcadas, el orden no cambia.)
+    regs.sort(key=lambda r: (
+        (r.fecha - timedelta(days=1)).isocalendar()[:2] if r.hora_inicio == _MID else r.fecha.isocalendar()[:2],
+        1 if r.motivo else 0, r.fecha, r.hora_inicio,
+    ))
     dias_fin_mid = {r.fecha for r in regs if r.hora_fin == _MID}
     # Horas de la "cola" que sigue a cada turno que termina a medianoche. Sirven para
     # calcular el almuerzo del turno COMPLETO (base + cola), no solo de la parte antes de
@@ -1775,13 +1825,15 @@ def crear_comentario(
     # FUERZA la suya, para que no pueda escribir en el hilo de otra haciéndose pasar por
     # parte de ese equipo.
     eq = payload.equipo_id if user.rol == "super_admin" else user.equipo_id
-    # #8 TH solo puede comentar un área cuando ya está en REVISIÓN de TH (en_th) o
-    # aprobada; antes de eso el área aún es del registrador/líder.
+    # #8 TH puede comentar un área desde que ENTRÓ al flujo (el registrador la envió a
+    # validación → 'pend_validacion' en adelante): ahí ya existe el hilo y TH supervisa.
+    # Solo mientras el registrador la está redactando ('registro', o sin fila de flujo aún)
+    # no hay nada que comentar y el área es de ellos.
     if user.rol == "super_admin" and eq:
         pe = db.scalar(select(m.PeriodoEquipo).where(
             m.PeriodoEquipo.periodo_id == periodo_id, m.PeriodoEquipo.equipo_id == eq))
-        if not pe or pe.estado_flujo not in ("en_th", "aprobado"):
-            raise HTTPException(409, "Podrás comentar esta área cuando la envíen a revisión de Talento Humano.")
+        if not pe or pe.estado_flujo == "registro":
+            raise HTTPException(409, "Podrás comentar esta área cuando el registrador la envíe a validación.")
     c = m.Comentario(periodo_id=periodo_id, equipo_id=eq, autor_nombre=user.nombre,
                      autor_rol=user.rol, texto=payload.texto, tipo=payload.tipo)
     # Notificar a la contraparte del área (sin spam: una por comentario).
@@ -1796,13 +1848,13 @@ def crear_comentario(
             db.add(m.Notificacion(rol_destino=destino, equipo_id=eq, tipo="PERIODO_LISTO",
                                   titulo="Nuevo mensaje en el chat del período",
                                   descripcion=f"{user.nombre}: {payload.texto[:120]}"))
-    # #2 Solo una OBSERVACIÓN de TH DEVUELVE el área al equipo (si estaba en TH): vuelve a
-    # 'registro' para que corrijan. Un COMENTARIO normal NO devuelve el flujo — TH puede
-    # comentar la línea de tiempo sin sacar el área de revisión. Si TH está conforme, aprueba.
+    # #2 Solo una OBSERVACIÓN de TH DEVUELVE el área al equipo (si estaba en el flujo: pend.
+    # validación, validada o en TH): vuelve a 'registro' para que corrijan. Un COMENTARIO normal
+    # NO devuelve el flujo — TH comenta la línea de tiempo sin sacar el área. Si está conforme, aprueba.
     if user.rol == "super_admin" and eq and payload.tipo == "observacion":
         pe_dev = db.scalar(select(m.PeriodoEquipo).where(
             m.PeriodoEquipo.periodo_id == periodo_id, m.PeriodoEquipo.equipo_id == eq))
-        if pe_dev and pe_dev.estado_flujo == "en_th":
+        if pe_dev and pe_dev.estado_flujo in ("pend_validacion", "validado", "en_th"):
             pe_dev.estado_flujo = "registro"
             pe_dev.validado_lider = False
             pe_dev.enviado_a_rh_en = None
