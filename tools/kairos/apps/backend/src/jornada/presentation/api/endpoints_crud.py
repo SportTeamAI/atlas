@@ -293,6 +293,32 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
     # este período y las de la quincena anterior que compartan semana (ver abajo)—.
     # Antes se asumían 8 h por día previo, lo que inflaba extras fantasma cuando la
     # semana anterior no tenía datos (p. ej. un domingo salía con extra sin deberlo).
+    # ── Novedades remuneradas = TIEMPO hacia el tope de 42h, PERO SOLO para las EXTRAS
+    # MARCADAS (las que se ponen en 'novedades y extras', con motivo). El HORARIO normal NO
+    # cambia: un turno de horario solo es extra si las horas realmente TRABAJADAS pasan de
+    # 42. Así, si en una semana con vacaciones/incapacidad/licencia/votación se MARCA una
+    # extra, esa extra sale como extra porque las novedades ya llenaron el tope. Es cálculo
+    # interno: las horas de la novedad NO se muestran ni se pagan como extra. DESCANSO no
+    # suma (0h); GUARDIA es marcador; las NO remuneradas tampoco suman. #novedad-tope
+    _netos = sorted(r.duracion_neta_h for r in regs
+                    if r.hora_inicio != _MID and not r.motivo and (r.duracion_neta_h or 0) > 0)
+    jornada_net = _netos[len(_netos) // 2] if _netos else (lim_dia or 8.0)
+    descanso_dates: set[date] = set()
+    novedad_wk: dict[tuple[int, int], float] = {}   # horas de novedad por semana (solo para extras marcadas)
+    if not sin_extras:
+        for _n in db.scalars(select(m.Novedad).where(
+            m.Novedad.empleado_id == emp.id,
+            m.Novedad.fecha_inicio <= fin_semana, m.Novedad.fecha_fin >= ini_semana,
+        )):
+            _d, _top = max(_n.fecha_inicio, ini_semana), min(_n.fecha_fin, fin_semana)
+            if _n.tipo == "DESCANSO":
+                while _d <= _top:
+                    descanso_dates.add(_d); _d += timedelta(days=1)
+            elif _n.es_remunerada and _n.tipo != "GUARDIA":
+                while _d <= _top:
+                    _wk = _d.isocalendar()[:2]
+                    novedad_wk[_wk] = novedad_wk.get(_wk, 0.0) + (_n.fraccion_dia or 1.0) * jornada_net
+                    _d += timedelta(days=1)
     for reg in regs:
         # #punto5 La cola (madrugada 00:00-…) es la CONTINUACIÓN del turno del día ANTERIOR: para
         # el TOPE de 42h cuenta en la semana del día en que ARRANCÓ el turno, NO en la del
@@ -301,6 +327,12 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
         es_cola = reg.hora_inicio == _MID
         wk = (reg.fecha - timedelta(days=1)).isocalendar()[:2] if es_cola else reg.fecha.isocalendar()[:2]
         antes = acc.get(wk, 0.0)
+        # Extra MARCADA de DÍA en el día de descanso = extra. Se EXCLUYEN: los turnos de
+        # HORARIO (sin motivo), la COLA (madrugada 00:00-… del día anterior) y los TURNOS
+        # DE NOCHE (cruzan o terminan a medianoche): esos conservan su clasificación normal
+        # (un turno de noche que termina en domingo-descanso sigue en descanso). #descanso-extra
+        _es_desc_trab = (reg.fecha in descanso_dates and bool(reg.motivo) and not es_cola
+                         and reg.hora_fin > reg.hora_inicio)
         es_fest = es_festivo(reg.fecha)
         # ¿Es la "cola" (00:00-…) de un turno que arrancó el día anterior? Entonces es
         # la CONTINUACIÓN del turno base, no un bloque agregado: no toma el almuerzo del
@@ -318,7 +350,8 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
         if reg.periodo_id != per.id:
             # Otra quincena, MISMA semana: suma su neto ya guardado al acumulado semanal
             # (así una semana partida entre dos períodos se completa y se sabe si pasa de 42 h).
-            if not sin_extras:
+            # El trabajo en día de descanso es TODO extra: no llena el tope ordinario.
+            if not sin_extras and not _es_desc_trab:
                 acc[wk] = antes + (reg.duracion_neta_h or 0.0)
             continue
         # Alimentación: el almuerzo se descuenta SIEMPRE (también en domingo/festivo y en
@@ -361,21 +394,25 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
             jornada=jornada_dia, daily_limit=lim_dia, weekly_limit=None,
             meal_hours=meal_h,
             is_holiday=es_fest,
-            is_employee_rest_day=(reg.fecha.weekday() == descanso),
+            is_employee_rest_day=(reg.fecha.weekday() == descanso) or _es_desc_trab,
             # Salto de día: si el turno cruza medianoche, la parte del día siguiente
             # toma el festivo/descanso de ESE día (p. ej. festivo → normal).
             is_holiday_next=es_festivo(reg.fecha + timedelta(days=1)),
             is_employee_rest_day_next=((reg.fecha + timedelta(days=1)).weekday() == descanso),
-            weekly_accumulated_before=antes,
+            # Las novedades remuneradas cuentan al tope SOLO para la extra MARCADA (el turno
+            # de horario usa lo realmente trabajado, sin cambiar). #novedad-tope
+            weekly_accumulated_before=antes + (novedad_wk.get(wk, 0.0) if es_extra_marcado else 0.0),
             daily_accumulated_before=dia_antes,
             es_extra_marcado=es_extra_marcado,
+            force_extra=_es_desc_trab,   # extra marcada de día en el descanso = TODO extra
         )
         # La cola y las extras marcadas NO suman al acumulado diario: si lo hicieran, el
         # turno base del día se vería como bloque "agregado" y saldría todo extra.
         if not es_cola and not es_extra_marcado:
             acc_dia[reg.fecha] = dia_antes + r.net_hours   # trabajo neto del día (base)
         # Solo los días con regla SEMANAL suman al acumulado (los diarios/festivos no).
-        if not dia_diario:
+        # El trabajo en día de descanso es TODO extra: va POR ENCIMA del tope, no lo llena.
+        if not dia_diario and not _es_desc_trab:
             acc[wk] = antes + r.net_hours
         reg.duracion_bruta_h = r.gross_hours
         reg.duracion_neta_h = r.net_hours

@@ -74,8 +74,13 @@ def _extra_hours(
     weekly_accumulated_before: float,
     daily_accumulated_before: float = 0.0,
     es_extra_marcado: bool = False,
+    force_extra: bool = False,
 ) -> float:
     """Calcula cuántas horas del turno son EXTRA según el tipo de jornada."""
+    # Trabajo en el DÍA DE DESCANSO del empleado: TODO el turno es extra (trabajó en su
+    # descanso), sin importar el tope semanal ni el tipo de jornada. #descanso-extra
+    if force_extra:
+        return net
     # Bloque marcado explícitamente como extra (lleva un motivo/justificación): en la
     # jornada día a día es TODO extra, sin importar el orden respecto al turno base.
     if es_extra_marcado and jornada == JornadaType.ESTANDAR:
@@ -112,6 +117,7 @@ def classify_shift(
     weekly_accumulated_before: float = 0.0,
     daily_accumulated_before: float = 0.0,
     es_extra_marcado: bool = False,
+    force_extra: bool = False,
     vigencias: tuple[RecargoConfig, ...] = DEFAULT_VIGENCIAS,
 ) -> ShiftClassification:
     """Clasifica un turno completo y devuelve las horas por categoría con recargo.
@@ -150,7 +156,7 @@ def classify_shift(
 
     wk_limit = weekly_limit if weekly_limit is not None else cfg.jornada_max_semanal
     # El TOPE de extras se mide sobre lo realmente trabajado (net).
-    extra = _extra_hours(jornada, net, gross, daily_limit, wk_limit, weekly_accumulated_before, daily_accumulated_before, es_extra_marcado)
+    extra = _extra_hours(jornada, net, gross, daily_limit, wk_limit, weekly_accumulated_before, daily_accumulated_before, es_extra_marcado, force_extra)
 
     # #salto-de-día: los tramos DESPUÉS de medianoche pertenecen al día siguiente, así
     # que su festivo/dominical se decide con el estado del día siguiente. Un turno que
