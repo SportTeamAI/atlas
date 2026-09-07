@@ -394,7 +394,11 @@ def _reclasificar_periodo_emp(db: Session, emp: m.Empleado, per: m.Periodo) -> N
             jornada=jornada_dia, daily_limit=lim_dia, weekly_limit=None,
             meal_hours=meal_h,
             is_holiday=es_fest,
-            is_employee_rest_day=(reg.fecha.weekday() == descanso) or _es_desc_trab,
+            # El recargo DOMINICAL/festivo solo aplica si el día ES domingo (o festivo, via
+            # is_holiday). El DESCANSO entre semana NO es dominical: la extra trabajada en él
+            # es normal (diurna/nocturna REG); por eso NO se fuerza is_employee_rest_day aquí,
+            # solo se fuerza que sea extra (force_extra). #descanso-no-es-dominical
+            is_employee_rest_day=(reg.fecha.weekday() == descanso),
             # Salto de día: si el turno cruza medianoche, la parte del día siguiente
             # toma el festivo/descanso de ESE día (p. ej. festivo → normal).
             is_holiday_next=es_festivo(reg.fecha + timedelta(days=1)),
