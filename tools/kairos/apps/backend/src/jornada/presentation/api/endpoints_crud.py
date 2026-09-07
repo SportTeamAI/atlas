@@ -2771,9 +2771,14 @@ def crear_registro(payload: s.RegistroIn, user: m.Usuario = Depends(require_rol(
         if not (per.fecha_inicio <= payload.fecha <= per.fecha_fin):
             raise HTTPException(400, "La fecha está fuera del rango del período.")
         _guardar_cambio(db, per.id, user)
-    if db.scalar(select(m.Novedad).where(
+    # Si ese día ya hay una novedad (vacaciones/incapacidad/licencia/descanso…) NO se puede
+    # cargar un turno de HORARIO normal — PERO SÍ una HORA EXTRA marcada (bloque AGREGADO con
+    # motivo): la persona pudo trabajar extra durante su novedad y esa extra debe contarse.
+    # #extra-sobre-novedad
+    _es_extra_marcada = bool(payload.motivo) and not payload.reemplazar
+    if not _es_extra_marcada and db.scalar(select(m.Novedad).where(
         m.Novedad.empleado_id == emp.id, m.Novedad.fecha_inicio <= payload.fecha, m.Novedad.fecha_fin >= payload.fecha)):
-        raise HTTPException(409, "El empleado tiene una novedad ese día; no se puede registrar horario.")
+        raise HTTPException(409, "El empleado tiene una novedad ese día. Si trabajó, agrégalo como HORA EXTRA (con motivo).")
     # El turno se parte por medianoche (cada tramo cuenta en SU día).
     partes = _partir_medianoche(payload.fecha, payload.hora_inicio, payload.hora_fin)
     # #1 Al AGREGAR un bloque/extra NO se puede pisar horas ya cargadas ese día (no se
